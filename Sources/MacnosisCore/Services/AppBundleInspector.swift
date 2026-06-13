@@ -37,6 +37,8 @@ public struct AppBundleInspector: Sendable {
                 ?? normalizedURL.deletingPathExtension().lastPathComponent,
             bundleIdentifier: info["CFBundleIdentifier"] as? String,
             version: info["CFBundleShortVersionString"] as? String,
+            buildVersion: info["CFBundleVersion"] as? String,
+            bundleInfoString: info["CFBundleGetInfoString"] as? String,
             executableName: executableName,
             executableURL: executableURL,
             executableFileDescription: nil

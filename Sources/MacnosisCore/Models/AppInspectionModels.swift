@@ -5,6 +5,8 @@ public struct AppInspectionReport: Equatable, Sendable {
     public let bundleName: String
     public let bundleIdentifier: String?
     public let version: String?
+    public let buildVersion: String?
+    public let bundleInfoString: String?
     public let executableName: String?
     public let executableURL: URL?
     public var executableFileDescription: String?
@@ -19,6 +21,8 @@ public struct AppInspectionReport: Equatable, Sendable {
         bundleName: String,
         bundleIdentifier: String?,
         version: String?,
+        buildVersion: String?,
+        bundleInfoString: String?,
         executableName: String?,
         executableURL: URL?,
         executableFileDescription: String?,
@@ -32,6 +36,8 @@ public struct AppInspectionReport: Equatable, Sendable {
         self.bundleName = bundleName
         self.bundleIdentifier = bundleIdentifier
         self.version = version
+        self.buildVersion = buildVersion
+        self.bundleInfoString = bundleInfoString
         self.executableName = executableName
         self.executableURL = executableURL
         self.executableFileDescription = executableFileDescription
@@ -146,6 +152,23 @@ public struct AppInspectionReport: Equatable, Sendable {
         executableFileDescription ?? "Unknown"
     }
 
+    public var builderSummary: String? {
+        guard let bundleInfoString = sanitizedMetadata(bundleInfoString) else {
+            return nil
+        }
+
+        let comparableValues = [
+            sanitizedMetadata(version),
+            sanitizedMetadata(buildVersion),
+        ]
+
+        if comparableValues.contains(bundleInfoString) {
+            return nil
+        }
+
+        return bundleInfoString
+    }
+
     public var architectures: [AppArchitecture] {
         let output = architectureSummary.lowercased()
         if output.contains("shell script") || output.contains("script text executable") {
@@ -199,6 +222,15 @@ public struct AppInspectionReport: Equatable, Sendable {
         }
 
         return String(line.dropFirst(prefix.count))
+    }
+
+    private func sanitizedMetadata(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedValue.isEmpty ? nil : trimmedValue
     }
 
     public mutating func apply(_ result: AppInspectionCommandResult) {

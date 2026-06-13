@@ -273,27 +273,7 @@ private struct InspectedAppRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            AppIconView(url: app.url, size: 28)
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: statusImage)
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 14, height: 14)
-                        .background(statusColor)
-                        .clipShape(Circle())
-                        .overlay {
-                            Circle()
-                                .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 1)
-                        }
-                        .offset(x: 3, y: 3)
-                }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(app.displayName)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                RowStatusLine(app: app)
-            }
+            rowIdentity
 
             Spacer(minLength: 4)
 
@@ -316,6 +296,36 @@ private struct InspectedAppRow: View {
         .background(isSelected ? MacnosisTheme.selection : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .onTapGesture(perform: select)
+    }
+
+    private var rowIdentity: some View {
+        HStack(spacing: 10) {
+            AppIconView(url: app.url, size: 28)
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: statusImage)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 14, height: 14)
+                        .background(statusColor)
+                        .clipShape(Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 1)
+                        }
+                        .offset(x: 3, y: 3)
+                }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                RowStatusLine(app: app)
+            }
+        }
+        .contentShape(Rectangle())
+        .highPriorityGesture(
+            TapGesture().onEnded(select)
+        )
     }
 
     private var statusImage: String {
@@ -495,10 +505,14 @@ private struct InspectionReportView: View {
     private var detailGrid: some View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 22, verticalSpacing: 10) {
             detailRow("Bundle ID", report.bundleIdentifier ?? "Unknown")
-            if report.bundleName != packageName {
-                detailRow("Bundle Name", report.bundleName)
-            }
+            detailRow("Bundle Name", report.bundleName)
             detailRow("Version", report.version ?? "Unknown")
+            if let buildVersion = report.buildVersion, buildVersion != report.version {
+                detailRow("Build", buildVersion)
+            }
+            if let builderSummary = report.builderSummary {
+                detailRow("Built With", builderSummary)
+            }
             detailRow("Executable", report.executableName ?? "Unknown")
             architectureRow
         }
@@ -585,13 +599,11 @@ private struct InspectionReportView: View {
         GridRow {
             Text("Architecture")
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 6) {
-                if report.hasExecutableFileDescription {
-                    ArchitecturePillStack(badges: architectureBadges(for: report))
-                } else {
-                    Text("Checking")
-                        .foregroundStyle(.secondary)
-                }
+            if report.hasExecutableFileDescription {
+                ArchitecturePillStack(badges: architectureBadges(for: report))
+            } else {
+                Text("Checking")
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1021,7 +1033,7 @@ private struct ArchitecturePill: View {
         }
         .foregroundStyle(badge.color)
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 4)
         .background(Color.primary.opacity(0.055))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .quickTip(badge.help)
