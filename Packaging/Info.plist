@@ -10,6 +10,8 @@
     <string>Macnosis</string>
     <key>CFBundleDisplayName</key>
     <string>Macnosis</string>
+    <key>CFBundleIconFile</key>
+    <string>MacnosisIcon.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
