@@ -117,14 +117,28 @@ struct InspectedApp: Identifiable, Equatable {
             return "Queued"
         }
 
-        if report.isSignatureValid, report.isQuarantined == false {
-            return "Healthy"
+        if report.isDebuggable {
+            return "Debuggable"
         }
 
-        return "Warning"
+        switch report.gatekeeperStatus {
+        case .accepted:
+            return report.isQuarantined ? "Accepted, Quarantined" : "Accepted"
+        case .rejected:
+            return "Gatekeeper Rejected"
+        case .unknown:
+            return report.isSignatureValid ? "Checked" : "Signature Issue"
+        }
     }
 
     var hasWarning: Bool {
-        errorMessage != nil || report?.isSignatureValid == false || report?.isQuarantined == true
+        guard let report else {
+            return errorMessage != nil
+        }
+
+        return errorMessage != nil
+            || report.isSignatureValid == false
+            || report.gatekeeperStatus == .rejected
+            || report.isQuarantined
     }
 }

@@ -50,9 +50,73 @@ public struct AppInspectionReport: Equatable, Sendable {
         signatureVerification.exitCode == 0
     }
 
+    public var gatekeeperStatus: GatekeeperStatus {
+        let output = gatekeeperAssessment.combinedOutput
+        if gatekeeperAssessment.exitCode == 0 || output.contains(": accepted") {
+            return .accepted
+        }
+
+        if output.contains(": rejected") {
+            return .rejected
+        }
+
+        return .unknown
+    }
+
+    public var isAdHocSigned: Bool {
+        signingDetails.combinedOutput.contains("Signature=adhoc")
+            || signingDetails.combinedOutput.contains("TeamIdentifier=not set")
+    }
+
+    public var hasDeveloperIDSignature: Bool {
+        signingDetails.combinedOutput.contains("Authority=Developer ID Application")
+    }
+
+    public var isDebuggable: Bool {
+        entitlements.combinedOutput.contains("com.apple.security.get-task-allow")
+    }
+
     public var architectureSummary: String {
         executableFileDescription ?? "Unknown"
     }
+
+    public var architectures: [AppArchitecture] {
+        let output = architectureSummary.lowercased()
+        let hasAppleSilicon = output.contains("arm64") || output.contains("arm64e")
+        let hasIntel64 = output.contains("x86_64")
+        let hasIntel32 = output.contains("i386")
+
+        if hasAppleSilicon, hasIntel64 {
+            return [.universal]
+        }
+
+        var architectures: [AppArchitecture] = []
+        if hasAppleSilicon {
+            architectures.append(.appleSilicon)
+        }
+        if hasIntel64 {
+            architectures.append(.intel64)
+        }
+        if hasIntel32 {
+            architectures.append(.intel32)
+        }
+
+        return architectures.isEmpty ? [.unknown] : architectures
+    }
+}
+
+public enum GatekeeperStatus: Equatable, Sendable {
+    case accepted
+    case rejected
+    case unknown
+}
+
+public enum AppArchitecture: Equatable, Sendable {
+    case universal
+    case appleSilicon
+    case intel64
+    case intel32
+    case unknown
 }
 
 public struct CommandResult: Equatable, Sendable {

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MacnosisContentView: View {
     @ObservedObject var model: MacnosisAppModel
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,13 +44,16 @@ struct MacnosisContentView: View {
 
     @ViewBuilder
     private var workspace: some View {
-        HStack(spacing: 0) {
-            if model.inspectedApps.isEmpty == false {
-                inspectedAppsSidebar
-                Divider()
-            }
-
+        if model.inspectedApps.isEmpty {
             detailPane
+        } else {
+            NavigationSplitView(columnVisibility: $sidebarVisibility) {
+                inspectedAppsSidebar
+                    .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 440)
+            } detail: {
+                detailPane
+            }
+            .navigationSplitViewStyle(.balanced)
         }
     }
 
@@ -77,7 +81,6 @@ struct MacnosisContentView: View {
                 .padding(.bottom, 8)
             }
         }
-        .frame(width: 250)
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
@@ -153,7 +156,7 @@ private struct InspectedAppRow: View {
     let close: () -> Void
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 10) {
             AppIconView(url: app.url, size: 28)
                 .overlay(alignment: .bottomTrailing) {
                     Image(systemName: statusImage)
@@ -173,10 +176,7 @@ private struct InspectedAppRow: View {
                 Text(app.displayName)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                Text(app.statusText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                RowStatusLine(app: app)
             }
 
             Spacer(minLength: 4)
@@ -194,8 +194,8 @@ private struct InspectedAppRow: View {
             .foregroundStyle(.secondary)
             .accessibilityLabel("Close \(app.displayName)")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .contentShape(Rectangle())
         .background(isSelected ? MacnosisTheme.selection : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -264,6 +264,42 @@ private struct AppDropZone: View {
     }
 }
 
+private struct RowStatusLine: View {
+    let app: InspectedApp
+
+    var body: some View {
+        if let report = app.report {
+            HStack(spacing: 6) {
+                ForEach(Array(architectureBadges(for: report).prefix(1))) { badge in
+                    ArchitectureGlyph(badge: badge, size: .compact)
+                }
+
+                ForEach(Array(diagnosticBadges(for: report).prefix(3))) { badge in
+                    RowStatusIcon(badge: badge)
+                }
+            }
+            .lineLimit(1)
+        } else {
+            Text(app.statusText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct RowStatusIcon: View {
+    let badge: DiagnosticBadge
+
+    var body: some View {
+        Image(systemName: badge.symbol)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(badge.color)
+            .frame(width: 13, height: 13)
+            .quickTip(badge.title)
+    }
+}
+
 private struct InspectionReportView: View {
     let report: AppInspectionReport
 
@@ -284,12 +320,13 @@ private struct InspectionReportView: View {
                     .id(report.bundleURL.path + "-attributes")
             }
             .padding(24)
+            .frame(maxWidth: 1180, alignment: .leading)
         }
     }
 
     private var summary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
                 AppIconView(url: report.bundleURL, size: 52)
 
                 VStack(alignment: .leading, spacing: 5) {
@@ -303,9 +340,8 @@ private struct InspectionReportView: View {
                         .truncationMode(.middle)
                 }
 
-                Spacer()
-                statusBadge(report.isSignatureValid ? "Signature Valid" : "Signature Issue", isGood: report.isSignatureValid)
-                statusBadge(report.isQuarantined ? "Quarantined" : "No Quarantine", isGood: report.isQuarantined == false)
+                Spacer(minLength: 24)
+                DiagnosticChipStack(badges: diagnosticBadges(for: report))
             }
         }
     }
@@ -318,9 +354,19 @@ private struct InspectionReportView: View {
             }
             detailRow("Version", report.version ?? "Unknown")
             detailRow("Executable", report.executableName ?? "Unknown")
-            detailRow("Architecture", report.architectureSummary)
+            architectureRow
         }
         .font(.system(size: 13))
+    }
+
+    private var architectureRow: some View {
+        GridRow {
+            Text("Architecture")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                ArchitecturePillStack(badges: architectureBadges(for: report))
+            }
+        }
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -332,14 +378,411 @@ private struct InspectionReportView: View {
         }
     }
 
-    private func statusBadge(_ text: String, isGood: Bool) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(isGood ? MacnosisTheme.good : MacnosisTheme.warning)
-    }
-
     private var packageName: String {
         report.bundleURL.deletingPathExtension().lastPathComponent
+    }
+}
+
+private struct DiagnosticChipStack: View {
+    let badges: [DiagnosticBadge]
+
+    var body: some View {
+        FlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
+            ForEach(badges) { badge in
+                DiagnosticChip(badge: badge)
+            }
+        }
+        .frame(maxWidth: 420, alignment: .trailing)
+    }
+}
+
+private struct ArchitecturePillStack: View {
+    let badges: [ArchitectureBadge]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(badges) { badge in
+                ArchitecturePill(badge: badge)
+            }
+        }
+    }
+}
+
+private struct ArchitecturePill: View {
+    let badge: ArchitectureBadge
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ArchitectureGlyph(badge: badge, size: .regular)
+            Text(badge.title)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(badge.color)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .quickTip(badge.help)
+    }
+}
+
+private struct ArchitectureGlyph: View {
+    enum Size {
+        case compact
+        case regular
+
+        var textSize: CGFloat {
+            switch self {
+            case .compact: 9
+            case .regular: 11
+            }
+        }
+
+        var width: CGFloat {
+            switch self {
+            case .compact: 19
+            case .regular: 22
+            }
+        }
+
+        var height: CGFloat {
+            switch self {
+            case .compact: 14
+            case .regular: 18
+            }
+        }
+    }
+
+    let badge: ArchitectureBadge
+    let size: Size
+
+    var body: some View {
+        content
+            .frame(width: size.width, height: size.height)
+            .background(size == .compact ? Color.clear : badge.color.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .foregroundStyle(badge.color)
+            .quickTip(size == .compact ? badge.title : badge.help)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if size == .compact {
+            Text(badge.glyph)
+                .font(.system(size: size.textSize, weight: .bold, design: .monospaced))
+                .minimumScaleFactor(0.72)
+                .lineLimit(1)
+        } else {
+            Image(systemName: "cpu")
+                .font(.system(size: size.textSize, weight: .semibold))
+        }
+    }
+}
+
+private struct DiagnosticChip: View {
+    let badge: DiagnosticBadge
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: badge.symbol)
+                .font(.system(size: 11, weight: .semibold))
+            Text(badge.title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(badge.color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(badge.color.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .quickTip(badge.help)
+    }
+}
+
+private struct DiagnosticBadge: Identifiable {
+    let id: String
+    let symbol: String
+    let title: String
+    let help: String
+    let color: Color
+}
+
+private struct ArchitectureBadge: Identifiable {
+    let id: String
+    let glyph: String
+    let title: String
+    let help: String
+    let color: Color
+}
+
+private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBadge] {
+    var badges: [DiagnosticBadge] = []
+
+    if report.isDebuggable {
+        badges.append(
+            DiagnosticBadge(
+                id: "debuggable",
+                symbol: "ladybug.fill",
+                title: "Debuggable",
+                help: "The app has com.apple.security.get-task-allow and can be attached to by debugging tools.",
+                color: MacnosisTheme.debug
+            )
+        )
+    }
+
+    switch report.gatekeeperStatus {
+    case .accepted:
+        badges.append(
+            DiagnosticBadge(
+                id: "gatekeeper-accepted",
+                symbol: "checkmark.seal.fill",
+                title: "Gatekeeper Accepted",
+                help: "Gatekeeper accepts this app for launch.",
+                color: MacnosisTheme.good
+            )
+        )
+    case .rejected:
+        badges.append(
+            DiagnosticBadge(
+                id: "gatekeeper-rejected",
+                symbol: "xmark.octagon.fill",
+                title: "Gatekeeper Rejected",
+                help: "Gatekeeper does not trust this app for normal launch/distribution.",
+                color: MacnosisTheme.warning
+            )
+        )
+    case .unknown:
+        badges.append(
+            DiagnosticBadge(
+                id: "gatekeeper-unknown",
+                symbol: "questionmark.circle.fill",
+                title: "Gatekeeper Unknown",
+                help: "Gatekeeper assessment did not clearly accept or reject the app.",
+                color: MacnosisTheme.neutral
+            )
+        )
+    }
+
+    if report.isQuarantined {
+        badges.append(
+            DiagnosticBadge(
+                id: "quarantined",
+                symbol: "lock.fill",
+                title: "Quarantined",
+                help: "The bundle still has com.apple.quarantine attributes.",
+                color: MacnosisTheme.warning
+            )
+        )
+    }
+
+    if report.isAdHocSigned {
+        badges.append(
+            DiagnosticBadge(
+                id: "ad-hoc",
+                symbol: "signature",
+                title: "Ad-hoc Signed",
+                help: "The app is locally/ad-hoc signed rather than signed with a Developer ID identity.",
+                color: MacnosisTheme.neutral
+            )
+        )
+    } else if report.hasDeveloperIDSignature {
+        badges.append(
+            DiagnosticBadge(
+                id: "developer-id",
+                symbol: "person.crop.circle.badge.checkmark",
+                title: "Developer ID",
+                help: "The app is signed with a Developer ID Application certificate.",
+                color: MacnosisTheme.good
+            )
+        )
+    }
+
+    if report.isSignatureValid == false {
+        badges.append(
+            DiagnosticBadge(
+                id: "signature-issue",
+                symbol: "exclamationmark.triangle.fill",
+                title: "Signature Issue",
+                help: "Strict code signature verification failed.",
+                color: MacnosisTheme.warning
+            )
+        )
+    }
+
+    return badges
+}
+
+private func architectureBadges(for report: AppInspectionReport) -> [ArchitectureBadge] {
+    report.architectures.map { architecture in
+        switch architecture {
+        case .universal:
+            ArchitectureBadge(
+                id: "architecture-universal",
+                glyph: "UNI",
+                title: "Universal",
+                help: "Universal binary. \(report.architectureSummary)",
+                color: MacnosisTheme.accent
+            )
+        case .appleSilicon:
+            ArchitectureBadge(
+                id: "architecture-apple-silicon",
+                glyph: "ARM",
+                title: "Apple Silicon",
+                help: "Apple Silicon binary. \(report.architectureSummary)",
+                color: MacnosisTheme.good
+            )
+        case .intel64:
+            ArchitectureBadge(
+                id: "architecture-intel-64",
+                glyph: "x64",
+                title: "Intel 64-bit",
+                help: "Intel 64-bit binary. \(report.architectureSummary)",
+                color: MacnosisTheme.neutral
+            )
+        case .intel32:
+            ArchitectureBadge(
+                id: "architecture-intel-32",
+                glyph: "x32",
+                title: "Intel 32-bit",
+                help: "Legacy Intel 32-bit binary. \(report.architectureSummary)",
+                color: MacnosisTheme.warning
+            )
+        case .unknown:
+            ArchitectureBadge(
+                id: "architecture-unknown",
+                glyph: "?",
+                title: "Unknown Architecture",
+                help: "Macnosis could not determine the executable architecture. \(report.architectureSummary)",
+                color: MacnosisTheme.neutral
+            )
+        }
+    }
+}
+
+private struct FlowLayout: Layout {
+    var horizontalSpacing: CGFloat
+    var verticalSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(proposal: proposal, subviews: subviews)
+        return CGSize(
+            width: rows.map(\.width).max() ?? 0,
+            height: rows.last.map { $0.y + $0.height } ?? 0
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = rows(proposal: proposal, subviews: subviews)
+        for row in rows {
+            for item in row.items {
+                subviews[item.index].place(
+                    at: CGPoint(x: bounds.maxX - row.width + item.x, y: bounds.minY + row.y),
+                    proposal: ProposedViewSize(item.size)
+                )
+            }
+        }
+    }
+
+    private func rows(proposal: ProposedViewSize, subviews: Subviews) -> [FlowRow] {
+        let maxWidth = proposal.width ?? .infinity
+        var rows: [FlowRow] = []
+        var current = FlowRow()
+
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let nextWidth = current.items.isEmpty ? size.width : current.width + horizontalSpacing + size.width
+
+            if nextWidth > maxWidth, current.items.isEmpty == false {
+                rows.append(current)
+                current = FlowRow(y: current.y + current.height + verticalSpacing)
+            }
+
+            let x = current.items.isEmpty ? 0 : current.width + horizontalSpacing
+            current.items.append(FlowItem(index: index, x: x, size: size))
+            current.width = current.items.isEmpty ? size.width : x + size.width
+            current.height = max(current.height, size.height)
+        }
+
+        if current.items.isEmpty == false {
+            rows.append(current)
+        }
+
+        return rows
+    }
+}
+
+private struct FlowRow {
+    var items: [FlowItem] = []
+    var width: CGFloat = 0
+    var height: CGFloat = 0
+    var y: CGFloat = 0
+}
+
+private struct FlowItem {
+    let index: Int
+    let x: CGFloat
+    let size: CGSize
+}
+
+private extension View {
+    func quickTip(_ text: String, delayMilliseconds: Int = 240) -> some View {
+        modifier(QuickTipModifier(text: text, delayMilliseconds: delayMilliseconds))
+    }
+}
+
+private struct QuickTipModifier: ViewModifier {
+    let text: String
+    let delayMilliseconds: Int
+
+    @State private var isPresented = false
+    @State private var hoverTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                updateHover(hovering)
+            }
+            .popover(isPresented: $isPresented, arrowEdge: .top) {
+                Text(text)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .background(MacnosisTheme.panel)
+            }
+            .onDisappear {
+                hoverTask?.cancel()
+                isPresented = false
+            }
+    }
+
+    private func updateHover(_ hovering: Bool) {
+        hoverTask?.cancel()
+        guard hovering else {
+            withAnimation(.easeInOut(duration: 0.08)) {
+                isPresented = false
+            }
+            return
+        }
+
+        hoverTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, delayMilliseconds)) * 1_000_000)
+            } catch {
+                return
+            }
+
+            guard Task.isCancelled == false else {
+                return
+            }
+
+            withAnimation(.easeInOut(duration: 0.10)) {
+                isPresented = true
+            }
+        }
     }
 }
 
