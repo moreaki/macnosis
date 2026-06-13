@@ -1,38 +1,130 @@
 import Foundation
 import MacnosisCore
-import UniformTypeIdentifiers
 
 @MainActor
 final class MacnosisAppModel: ObservableObject {
-    @Published var selectedAppURL: URL?
-    @Published var report: AppInspectionReport?
-    @Published var errorMessage: String?
-    @Published var isInspecting = false
-    @Published var isImporterPresented = false
+    @Published private(set) var inspectedApps: [InspectedApp] = []
+    @Published var selectedAppID: InspectedApp.ID?
+    @Published var isDropTargeted = false
 
     private let inspector = AppBundleInspector()
+    private let appBundlePicker: AppBundlePicking
+
+    init(appBundlePicker: AppBundlePicking = AppBundleOpenPanel()) {
+        self.appBundlePicker = appBundlePicker
+    }
 
     func chooseApp() {
-        isImporterPresented = true
+        inspect(appBundlePicker.chooseAppBundles())
     }
 
     func inspect(_ url: URL) {
-        selectedAppURL = url
-        report = nil
-        errorMessage = nil
-        isInspecting = true
+        let normalizedURL = url.standardizedFileURL
+        let id = normalizedURL.path
+        selectedAppID = id
 
-        Task { @MainActor in
+        if let index = inspectedApps.firstIndex(where: { $0.id == id }) {
+            inspectedApps[index].isInspecting = true
+            inspectedApps[index].errorMessage = nil
+        } else {
+            inspectedApps.append(
+                InspectedApp(
+                    id: id,
+                    url: normalizedURL,
+                    report: nil,
+                    errorMessage: nil,
+                    isInspecting: true
+                )
+            )
+        }
+
+        Task.detached { [inspector] in
             do {
-                report = try inspector.inspect(bundleURL: url)
+                let report = try inspector.inspect(bundleURL: normalizedURL)
+                await MainActor.run {
+                    self.updateInspection(id: id, report: report, errorMessage: nil)
+                }
             } catch {
-                errorMessage = error.localizedDescription
+                await MainActor.run {
+                    self.updateInspection(id: id, report: nil, errorMessage: error.localizedDescription)
+                }
             }
-            isInspecting = false
         }
     }
 
-    var appImportTypes: [UTType] {
-        [UTType(filenameExtension: "app") ?? .applicationBundle]
+    func inspect(_ urls: [URL]) {
+        urls
+            .filter { $0.pathExtension.caseInsensitiveCompare("app") == .orderedSame }
+            .forEach(inspect)
+    }
+
+    func selectApp(id: InspectedApp.ID) {
+        selectedAppID = id
+    }
+
+    func closeApp(id: InspectedApp.ID) {
+        inspectedApps.removeAll { $0.id == id }
+
+        if selectedAppID == id {
+            selectedAppID = inspectedApps.last?.id
+        }
+    }
+
+    var selectedApp: InspectedApp? {
+        guard let selectedAppID else {
+            return inspectedApps.last
+        }
+
+        return inspectedApps.first { $0.id == selectedAppID }
+    }
+
+    private func updateInspection(id: InspectedApp.ID, report: AppInspectionReport?, errorMessage: String?) {
+        guard let index = inspectedApps.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        inspectedApps[index].report = report
+        inspectedApps[index].errorMessage = errorMessage
+        inspectedApps[index].isInspecting = false
+    }
+}
+
+struct InspectedApp: Identifiable, Equatable {
+    let id: String
+    let url: URL
+    var report: AppInspectionReport?
+    var errorMessage: String?
+    var isInspecting: Bool
+
+    var displayName: String {
+        packageName
+    }
+
+    var packageName: String {
+        url.deletingPathExtension().lastPathComponent
+    }
+
+    var statusText: String {
+        if isInspecting {
+            return "Inspecting"
+        }
+
+        if errorMessage != nil {
+            return "Blocked"
+        }
+
+        guard let report else {
+            return "Queued"
+        }
+
+        if report.isSignatureValid, report.isQuarantined == false {
+            return "Healthy"
+        }
+
+        return "Warning"
+    }
+
+    var hasWarning: Bool {
+        errorMessage != nil || report?.isSignatureValid == false || report?.isQuarantined == true
     }
 }
