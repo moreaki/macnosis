@@ -6,8 +6,8 @@ struct AppBundleOpenPanel: AppBundlePicking {
         let panel = NSOpenPanel()
         let delegate = AppBundleOpenPanelDelegate()
 
-        panel.title = "Inspect App"
-        panel.message = "Choose one or more macOS .app bundles to inspect."
+        panel.title = "Inspect Apps"
+        panel.message = "Choose app bundles, or choose a folder to inspect app bundles inside it."
         panel.prompt = "Inspect"
         panel.allowsMultipleSelection = true
         panel.canChooseFiles = true
@@ -26,20 +26,8 @@ private final class AppBundleOpenPanelDelegate: NSObject, NSOpenSavePanelDelegat
     }
 
     func panel(_ sender: Any, validate url: URL) throws {
-        guard url.isAppBundlePath else {
-            throw AppBundleOpenPanelError.notAppBundle(url)
-        }
-    }
-}
-
-private enum AppBundleOpenPanelError: LocalizedError {
-    case notAppBundle(URL)
-
-    var errorDescription: String? {
-        switch self {
-        case .notAppBundle(let url):
-            return "\(url.lastPathComponent) is not a macOS .app bundle."
-        }
+        // Non-app inputs are resolved by the model. Folders are scanned, and
+        // other unsupported items are ignored without interrupting selection.
     }
 }
 

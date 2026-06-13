@@ -5,6 +5,15 @@ public struct AppBundleInspector: Sendable {
     public init() {}
 
     public func inspect(bundleURL: URL) throws -> AppInspectionReport {
+        var report = try initialReport(bundleURL: bundleURL)
+        for command in inspectionCommands(for: report) {
+            report.apply(run(command, for: report))
+        }
+
+        return report
+    }
+
+    public func initialReport(bundleURL: URL) throws -> AppInspectionReport {
         let normalizedURL = bundleURL.standardizedFileURL
         guard normalizedURL.pathExtension == "app" else {
             throw AppInspectionError.notAppBundle(normalizedURL)
@@ -30,13 +39,44 @@ public struct AppBundleInspector: Sendable {
             version: info["CFBundleShortVersionString"] as? String,
             executableName: executableName,
             executableURL: executableURL,
-            executableFileDescription: executableURL.flatMap { run(["/usr/bin/file", $0.path], timeout: 5).combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines) },
-            signingDetails: run(["/usr/bin/codesign", "-dv", "--verbose=4", normalizedURL.path], timeout: 10),
-            entitlements: run(["/usr/bin/codesign", "-d", "--entitlements", ":-", normalizedURL.path], timeout: 10),
-            signatureVerification: run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", normalizedURL.path], timeout: 45),
-            gatekeeperAssessment: run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", normalizedURL.path], timeout: 20),
-            extendedAttributes: run(["/usr/bin/xattr", "-lr", normalizedURL.path], timeout: 20)
+            executableFileDescription: nil
         )
+    }
+
+    public func inspectionCommands(for report: AppInspectionReport) -> [AppInspectionCommand] {
+        AppInspectionCommand.allCases.filter { command in
+            switch command {
+            case .executableFileDescription:
+                return report.executableURL != nil
+            case .signingDetails, .entitlements, .signatureVerification, .gatekeeperAssessment, .extendedAttributes:
+                return true
+            }
+        }
+    }
+
+    public func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult {
+        let commandResult: CommandResult
+
+        switch command {
+        case .executableFileDescription:
+            if let executableURL = report.executableURL {
+                commandResult = run(["/usr/bin/file", executableURL.path], timeout: 5)
+            } else {
+                commandResult = CommandResult(command: ["/usr/bin/file"], exitCode: 127, standardOutput: "", standardError: "No executable was found in the app bundle.")
+            }
+        case .signingDetails:
+            commandResult = run(["/usr/bin/codesign", "-dv", "--verbose=4", report.bundleURL.path], timeout: 10)
+        case .entitlements:
+            commandResult = run(["/usr/bin/codesign", "-d", "--entitlements", ":-", report.bundleURL.path], timeout: 10)
+        case .signatureVerification:
+            commandResult = run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", report.bundleURL.path], timeout: 45)
+        case .gatekeeperAssessment:
+            commandResult = run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", report.bundleURL.path], timeout: 60)
+        case .extendedAttributes:
+            commandResult = run(["/usr/bin/xattr", "-lr", report.bundleURL.path], timeout: 20)
+        }
+
+        return AppInspectionCommandResult(command: command, result: commandResult)
     }
 
     private func run(_ command: [String], timeout: TimeInterval) -> CommandResult {

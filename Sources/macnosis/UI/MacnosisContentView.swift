@@ -14,7 +14,7 @@ struct MacnosisContentView: View {
         .background(MacnosisTheme.background)
         .dropDestination(for: URL.self) { urls, _ in
             model.inspect(urls)
-            return urls.contains { $0.pathExtension.caseInsensitiveCompare("app") == .orderedSame }
+            return urls.contains { $0.pathExtension.caseInsensitiveCompare("app") == .orderedSame || $0.hasDirectoryPath }
         } isTargeted: { isTargeted in
             model.isDropTargeted = isTargeted
         }
@@ -32,6 +32,17 @@ struct MacnosisContentView: View {
 
             Spacer()
 
+            if model.activeInspectionCount > 0 {
+                InspectionActivityView(
+                    activeInspectionCount: model.activeInspectionCount,
+                    activeLightWorkerCount: model.activeLightInspectionCommandCount,
+                    lightWorkerCount: model.lightInspectionWorkerCount,
+                    activeDeepWorkerCount: model.activeDeepInspectionCommandCount,
+                    deepWorkerCount: model.deepInspectionWorkerCount
+                )
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+
             ToolbarIconButton(
                 symbol: "folder.badge.plus",
                 label: "Inspect Apps",
@@ -40,6 +51,7 @@ struct MacnosisContentView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
+        .animation(.easeInOut(duration: 0.18), value: model.activeInspectionCount)
     }
 
     @ViewBuilder
@@ -87,7 +99,15 @@ struct MacnosisContentView: View {
     @ViewBuilder
     private var detailPane: some View {
         if let app = model.selectedApp {
-            if app.isInspecting {
+            if let report = app.report {
+                InspectionReportView(
+                    app: app,
+                    report: report,
+                    clearQuarantine: { model.clearQuarantine(for: app.id) },
+                    createDebuggableCopy: { model.createDebuggableCopy(for: app.id) },
+                    repairDamagedInPlace: { model.repairDamagedInPlace(for: app.id) }
+                )
+            } else if app.isInspecting {
                 VStack(spacing: 12) {
                     ProgressView()
                     Text("Inspecting \(app.displayName)...")
@@ -100,8 +120,6 @@ struct MacnosisContentView: View {
                         .frame(maxWidth: 520)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let report = app.report {
-                InspectionReportView(report: report)
             } else {
                 AppDropZone(
                     title: app.errorMessage ?? "Inspection blocked.",
@@ -149,6 +167,104 @@ private struct ToolbarIconButton: View {
     }
 }
 
+private struct InspectionActivityView: View {
+    let activeInspectionCount: Int
+    let activeLightWorkerCount: Int
+    let lightWorkerCount: Int
+    let activeDeepWorkerCount: Int
+    let deepWorkerCount: Int
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(activeInspectionCount == 1 ? "Inspecting 1 app" : "Inspecting \(activeInspectionCount) apps")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.82))
+
+            InspectionLaneIndicator(
+                title: "Light",
+                activeWorkerCount: activeLightWorkerCount,
+                workerCount: lightWorkerCount,
+                tint: MacnosisTheme.accent,
+                barLimit: 8
+            )
+
+            InspectionLaneIndicator(
+                title: "Deep",
+                activeWorkerCount: activeDeepWorkerCount,
+                workerCount: deepWorkerCount,
+                tint: MacnosisTheme.neutral,
+                barLimit: 4
+            )
+        }
+        .quickTip("Light diagnostics run broadly; deep security checks are throttled.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(activeInspectionCount) apps still inspecting. \(activeLightWorkerCount) of \(lightWorkerCount) light workers and \(activeDeepWorkerCount) of \(deepWorkerCount) deep workers are active.")
+    }
+}
+
+private struct InspectionLaneIndicator: View {
+    let title: String
+    let activeWorkerCount: Int
+    let workerCount: Int
+    let tint: Color
+    let barLimit: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            WorkerPulseView(activeWorkerCount: activeWorkerCount, workerCount: workerCount, tint: tint, barLimit: barLimit)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.78))
+                Text("\(activeWorkerCount)/\(workerCount)")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+private struct WorkerPulseView: View {
+    let activeWorkerCount: Int
+    let workerCount: Int
+    let tint: Color
+    let barLimit: Int
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.34)) { context in
+            let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.34)
+
+            HStack(spacing: 2) {
+                ForEach(0..<min(max(workerCount, 1), max(1, barLimit)), id: \.self) { index in
+                    Capsule()
+                        .fill(tint.opacity(opacity(for: index, phase: phase, activeWorkerCount: activeWorkerCount)))
+                        .frame(width: 3, height: height(for: index, phase: phase))
+                }
+            }
+            .frame(width: CGFloat(min(max(workerCount, 1), max(1, barLimit))) * 5, height: 12)
+        }
+    }
+
+    private func opacity(for index: Int, phase: Int, activeWorkerCount: Int) -> Double {
+        guard activeWorkerCount > 0 else {
+            return 0.18
+        }
+
+        let isActiveSlot = index < activeWorkerCount
+        let isPulsing = ((index + phase) % 8) < 3
+        return isActiveSlot ? (isPulsing ? 0.78 : 0.42) : 0.18
+    }
+
+    private func height(for index: Int, phase: Int) -> CGFloat {
+        ((index + phase) % 8) < 3 ? 11 : 6
+    }
+}
+
 private struct InspectedAppRow: View {
     let app: InspectedApp
     let isSelected: Bool
@@ -181,7 +297,7 @@ private struct InspectedAppRow: View {
 
             Spacer(minLength: 4)
 
-            if app.isInspecting {
+            if app.isInspecting && app.report == nil {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -203,7 +319,7 @@ private struct InspectedAppRow: View {
     }
 
     private var statusImage: String {
-        if app.isInspecting {
+        if app.isInspecting && app.report == nil {
             return "clock"
         }
 
@@ -211,7 +327,7 @@ private struct InspectedAppRow: View {
     }
 
     private var statusColor: Color {
-        if app.isInspecting {
+        if app.isInspecting && app.report == nil {
             return MacnosisTheme.accent
         }
 
@@ -269,16 +385,26 @@ private struct RowStatusLine: View {
 
     var body: some View {
         if let report = app.report {
-            HStack(spacing: 6) {
-                ForEach(Array(architectureBadges(for: report).prefix(1))) { badge in
-                    ArchitectureGlyph(badge: badge, size: .compact)
-                }
+            let architectures = Array(architectureBadges(for: report).prefix(1))
+            let diagnostics = Array(diagnosticBadges(for: report).prefix(3))
 
-                ForEach(Array(diagnosticBadges(for: report).prefix(3))) { badge in
-                    RowStatusIcon(badge: badge)
+            if architectures.isEmpty && diagnostics.isEmpty {
+                Text(app.statusText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                HStack(spacing: 6) {
+                    ForEach(architectures) { badge in
+                        ArchitectureGlyph(badge: badge, size: .compact)
+                    }
+
+                    ForEach(diagnostics) { badge in
+                        RowStatusIcon(badge: badge)
+                    }
                 }
+                .lineLimit(1)
             }
-            .lineLimit(1)
         } else {
             Text(app.statusText)
                 .font(.system(size: 11))
@@ -292,35 +418,55 @@ private struct RowStatusIcon: View {
     let badge: DiagnosticBadge
 
     var body: some View {
-        Image(systemName: badge.symbol)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(badge.color)
+        DiagnosticSymbol(symbol: badge.symbol, color: badge.color, size: 10, isCrossed: badge.isCrossed)
             .frame(width: 13, height: 13)
             .quickTip(badge.title)
     }
 }
 
 private struct InspectionReportView: View {
+    let app: InspectedApp
     let report: AppInspectionReport
+    let clearQuarantine: () -> Void
+    let createDebuggableCopy: () -> Void
+    let repairDamagedInPlace: () -> Void
+
+    @State private var pendingAction: RepairAction?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 22) {
                 summary
                 detailGrid
-                CommandSection(title: "Code Signing", result: report.signingDetails)
-                    .id(report.bundleURL.path + "-signing")
-                CommandSection(title: "Entitlements", result: report.entitlements)
-                    .id(report.bundleURL.path + "-entitlements")
-                CommandSection(title: "Strict Verification", result: report.signatureVerification)
-                    .id(report.bundleURL.path + "-verification")
-                CommandSection(title: "Gatekeeper", result: report.gatekeeperAssessment)
-                    .id(report.bundleURL.path + "-gatekeeper")
-                CommandSection(title: "Extended Attributes", result: report.extendedAttributes)
-                    .id(report.bundleURL.path + "-attributes")
+                diagnosticPanels
+                if let actionMessage = app.actionMessage {
+                    ActionMessageView(message: actionMessage, isError: actionMessage.contains("error") || actionMessage.contains("failed"))
+                }
+                technicalLogs
             }
             .padding(24)
             .frame(maxWidth: 1180, alignment: .leading)
+        }
+        .confirmationDialog(
+            pendingAction?.title ?? "",
+            isPresented: Binding(
+                get: { pendingAction != nil },
+                set: { if $0 == false { pendingAction = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingAction {
+                Button(pendingAction.confirmTitle, role: pendingAction.role) {
+                    run(pendingAction)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingAction = nil
+            }
+        } message: {
+            if let pendingAction {
+                Text(pendingAction.message)
+            }
         }
     }
 
@@ -359,12 +505,93 @@ private struct InspectionReportView: View {
         .font(.system(size: 13))
     }
 
+    private var diagnosticPanels: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], alignment: .leading, spacing: 12) {
+            DiagnosticPanel(
+                symbol: signatureSymbol,
+                title: "Code Signature",
+                status: signatureStatusText,
+                tone: signatureTone,
+                message: signingMessage,
+                actionTitle: report.hasSignatureVerification && report.isSignatureValid == false ? "Repair In Place" : nil,
+                isWorking: app.isRepairing,
+                action: { pendingAction = .repairDamagedInPlace }
+            )
+
+            DiagnosticPanel(
+                symbol: developerIDSymbol,
+                title: "Developer ID",
+                status: developerIDStatusText,
+                tone: developerIDTone,
+                message: developerIDMessage,
+                actionTitle: nil,
+                isWorking: app.isRepairing,
+                action: {}
+            )
+
+            DiagnosticPanel(
+                symbol: gatekeeperSymbol,
+                title: "Gatekeeper",
+                status: gatekeeperStatusText,
+                tone: gatekeeperTone,
+                message: gatekeeperMessage,
+                actionTitle: report.hasGatekeeperAssessment && report.gatekeeperStatus == .rejected ? "Repair In Place" : nil,
+                isWorking: app.isRepairing,
+                action: { pendingAction = .repairDamagedInPlace }
+            )
+
+            DiagnosticPanel(
+                symbol: quarantineSymbol,
+                title: "Quarantine",
+                status: quarantineStatusText,
+                tone: quarantineTone,
+                message: quarantineMessage,
+                actionTitle: report.hasExtendedAttributes && report.isQuarantined ? "Clear Quarantine" : nil,
+                isWorking: app.isRepairing,
+                action: { pendingAction = .clearQuarantine }
+            )
+
+            DiagnosticPanel(
+                symbol: "ladybug.fill",
+                isSymbolCrossed: report.hasEntitlements && report.isDebuggable == false,
+                title: "Debugging",
+                status: debuggingStatusText,
+                tone: debuggingTone,
+                message: debuggingMessage,
+                actionTitle: report.hasEntitlements && report.isDebuggable == false ? "Create Debug Copy" : nil,
+                isWorking: app.isRepairing,
+                action: { pendingAction = .createDebuggableCopy }
+            )
+        }
+    }
+
+    private var technicalLogs: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 12) {
+                CommandLogSection(title: "Code Signing", result: report.signingDetails)
+                CommandLogSection(title: "Entitlements", result: report.entitlements)
+                CommandLogSection(title: "Strict Verification", result: report.signatureVerification)
+                CommandLogSection(title: "Gatekeeper", result: report.gatekeeperAssessment)
+                CommandLogSection(title: "Extended Attributes", result: report.extendedAttributes)
+            }
+            .padding(.top, 10)
+        } label: {
+            Label("Technical Logs", systemImage: "terminal")
+                .font(.system(size: 15, weight: .semibold))
+        }
+    }
+
     private var architectureRow: some View {
         GridRow {
             Text("Architecture")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
-                ArchitecturePillStack(badges: architectureBadges(for: report))
+                if report.hasExecutableFileDescription {
+                    ArchitecturePillStack(badges: architectureBadges(for: report))
+                } else {
+                    Text("Checking")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -381,6 +608,217 @@ private struct InspectionReportView: View {
     private var packageName: String {
         report.bundleURL.deletingPathExtension().lastPathComponent
     }
+
+    private var signatureSymbol: String {
+        guard report.hasSignatureVerification else {
+            return "clock"
+        }
+
+        return report.isSignatureValid ? "checkmark.seal.fill" : "signature"
+    }
+
+    private var signatureStatusText: String {
+        guard report.hasSignatureVerification else {
+            return "Checking"
+        }
+
+        return report.isSignatureValid ? "Valid on disk" : "Signature issue"
+    }
+
+    private var signatureTone: DiagnosticTone {
+        guard report.hasSignatureVerification else {
+            return .neutral
+        }
+
+        return report.isSignatureValid ? .good : .warning
+    }
+
+    private var signingMessage: String {
+        guard report.hasSignatureVerification else {
+            return "Strict code signature verification is still running."
+        }
+
+        if report.isSignatureValid {
+            return report.isAdHocSigned ? "The local ad-hoc signature is structurally valid." : "The bundle satisfies strict code signature verification."
+        }
+
+        return "Strict verification failed. Re-signing can repair stale or missing bundle seals."
+    }
+
+    private var developerIDSymbol: String {
+        guard report.hasSigningDetails else {
+            return "clock"
+        }
+
+        if report.hasDeveloperIDSignature {
+            return "person.crop.circle.badge.checkmark"
+        }
+
+        return report.isAdHocSigned ? "signature" : "person.crop.circle.badge.xmark"
+    }
+
+    private var developerIDStatusText: String {
+        guard report.hasSigningDetails else {
+            return "Checking"
+        }
+
+        if report.hasDeveloperIDSignature {
+            return "Present"
+        }
+
+        return report.isAdHocSigned ? "Ad-hoc only" : "Not present"
+    }
+
+    private var developerIDTone: DiagnosticTone {
+        guard report.hasSigningDetails else {
+            return .neutral
+        }
+
+        if report.hasDeveloperIDSignature {
+            return .good
+        }
+
+        return report.isAdHocSigned ? .neutral : .warning
+    }
+
+    private var developerIDMessage: String {
+        guard report.hasSigningDetails else {
+            return "Code signing identity details are still being read."
+        }
+
+        if let authority = report.developerIDAuthority {
+            if let teamIdentifier = report.teamIdentifier {
+                return "\(authority). TeamIdentifier \(teamIdentifier)."
+            }
+
+            return "\(authority). No TeamIdentifier was reported."
+        }
+
+        if report.isAdHocSigned {
+            return "This bundle is ad-hoc signed for local use. It has no Developer ID distribution identity or TeamIdentifier."
+        }
+
+        return "No Developer ID Application certificate was found in the code signing details."
+    }
+
+    private var gatekeeperSymbol: String {
+        guard report.hasGatekeeperAssessment else {
+            return "clock"
+        }
+
+        return switch report.gatekeeperStatus {
+        case .accepted: "checkmark.seal.fill"
+        case .rejected: "xmark.octagon.fill"
+        case .unknown: "questionmark.circle.fill"
+        }
+    }
+
+    private var gatekeeperStatusText: String {
+        guard report.hasGatekeeperAssessment else {
+            return "Checking"
+        }
+
+        return switch report.gatekeeperStatus {
+        case .accepted: "Accepted"
+        case .rejected: "Rejected"
+        case .unknown: "Unknown"
+        }
+    }
+
+    private var gatekeeperTone: DiagnosticTone {
+        guard report.hasGatekeeperAssessment else {
+            return .neutral
+        }
+
+        return report.gatekeeperStatus == .accepted ? .good : .warning
+    }
+
+    private var gatekeeperMessage: String {
+        guard report.hasGatekeeperAssessment else {
+            return "Gatekeeper assessment is still running."
+        }
+
+        switch report.gatekeeperStatus {
+        case .accepted:
+            return "macOS trusts this app for normal launch."
+        case .rejected:
+            return "macOS does not trust this app for normal distribution or first launch."
+        case .unknown:
+            return "Gatekeeper did not return a clear accept/reject result."
+        }
+    }
+
+    private var quarantineSymbol: String {
+        guard report.hasExtendedAttributes else {
+            return "clock"
+        }
+
+        return report.isQuarantined ? "lock.fill" : "lock.open.fill"
+    }
+
+    private var quarantineStatusText: String {
+        guard report.hasExtendedAttributes else {
+            return "Checking"
+        }
+
+        return report.isQuarantined ? "Quarantined" : "Clear"
+    }
+
+    private var quarantineTone: DiagnosticTone {
+        guard report.hasExtendedAttributes else {
+            return .neutral
+        }
+
+        return report.isQuarantined ? .warning : .good
+    }
+
+    private var quarantineMessage: String {
+        guard report.hasExtendedAttributes else {
+            return "Extended attributes are still being read."
+        }
+
+        return report.isQuarantined
+            ? "Downloaded-origin attributes are present and may trigger launch prompts."
+            : "No quarantine attributes were found in the inspected output."
+    }
+
+    private var debuggingStatusText: String {
+        guard report.hasEntitlements else {
+            return "Checking"
+        }
+
+        return report.isDebuggable ? "Attach allowed" : "Not debuggable"
+    }
+
+    private var debuggingTone: DiagnosticTone {
+        guard report.hasEntitlements else {
+            return .neutral
+        }
+
+        return report.isDebuggable ? .debug : .neutral
+    }
+
+    private var debuggingMessage: String {
+        guard report.hasEntitlements else {
+            return "Entitlements are still being read."
+        }
+
+        return report.isDebuggable
+            ? "get-task-allow is present, so debugger and memory tools can attach more easily."
+            : "Create an ad-hoc signed copy with get-task-allow for local debugging."
+    }
+
+    private func run(_ action: RepairAction) {
+        pendingAction = nil
+        switch action {
+        case .clearQuarantine:
+            clearQuarantine()
+        case .createDebuggableCopy:
+            createDebuggableCopy()
+        case .repairDamagedInPlace:
+            repairDamagedInPlace()
+        }
+    }
 }
 
 private struct DiagnosticChipStack: View {
@@ -393,6 +831,169 @@ private struct DiagnosticChipStack: View {
             }
         }
         .frame(maxWidth: 420, alignment: .trailing)
+    }
+}
+
+private enum DiagnosticTone {
+    case good
+    case warning
+    case debug
+    case neutral
+
+    var color: Color {
+        switch self {
+        case .good: MacnosisTheme.good
+        case .warning: MacnosisTheme.warning
+        case .debug: MacnosisTheme.debug
+        case .neutral: MacnosisTheme.neutral
+        }
+    }
+}
+
+private struct DiagnosticPanel: View {
+    let symbol: String
+    var isSymbolCrossed = false
+    let title: String
+    let status: String
+    let tone: DiagnosticTone
+    let message: String
+    let actionTitle: String?
+    let isWorking: Bool
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .center, spacing: 9) {
+                DiagnosticSymbol(symbol: symbol, color: tone.color, size: 15, isCrossed: isSymbolCrossed)
+                    .frame(width: 28, height: 28)
+                    .background(tone.color.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(status)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(tone.color)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+            }
+
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let actionTitle {
+                Button {
+                    action()
+                } label: {
+                    if isWorking {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Working")
+                    } else {
+                        Text(actionTitle)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isWorking)
+                .padding(.top, 1)
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 142, alignment: .topLeading)
+        .background(MacnosisTheme.panel)
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(tone.color.opacity(0.14), lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ActionMessageView: View {
+    let message: String
+    let isError: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isError ? MacnosisTheme.warning : MacnosisTheme.good)
+                .frame(width: 18)
+
+            Text(shortMessage)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((isError ? MacnosisTheme.warning : MacnosisTheme.good).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var shortMessage: String {
+        if message.count <= 360 {
+            return message
+        }
+
+        return String(message.prefix(360)) + "..."
+    }
+}
+
+private enum RepairAction: Identifiable {
+    case clearQuarantine
+    case createDebuggableCopy
+    case repairDamagedInPlace
+
+    var id: String {
+        switch self {
+        case .clearQuarantine: "clear-quarantine"
+        case .createDebuggableCopy: "create-debuggable-copy"
+        case .repairDamagedInPlace: "repair-damaged-in-place"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .clearQuarantine: "Clear quarantine attributes?"
+        case .createDebuggableCopy: "Create a debuggable copy?"
+        case .repairDamagedInPlace: "Repair this app in place?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .clearQuarantine:
+            return "This removes com.apple.quarantine attributes from the selected app bundle. It does not re-sign the app."
+        case .createDebuggableCopy:
+            return "This creates a sibling -debug.app copy, adds get-task-allow, and signs the copy ad-hoc. The original app is not modified."
+        case .repairDamagedInPlace:
+            return "This re-signs the selected app in place ad-hoc and clears removable launch-blocking attributes. Original Developer ID notarization and TeamIdentifier will not be preserved."
+        }
+    }
+
+    var confirmTitle: String {
+        switch self {
+        case .clearQuarantine: "Clear Quarantine"
+        case .createDebuggableCopy: "Create Debug Copy"
+        case .repairDamagedInPlace: "Repair In Place"
+        }
+    }
+
+    var role: ButtonRole? {
+        switch self {
+        case .clearQuarantine, .createDebuggableCopy:
+            return nil
+        case .repairDamagedInPlace:
+            return .destructive
+        }
     }
 }
 
@@ -485,8 +1086,7 @@ private struct DiagnosticChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: badge.symbol)
-                .font(.system(size: 11, weight: .semibold))
+            DiagnosticSymbol(symbol: badge.symbol, color: badge.color, size: 11, isCrossed: badge.isCrossed)
             Text(badge.title)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
@@ -506,6 +1106,39 @@ private struct DiagnosticBadge: Identifiable {
     let title: String
     let help: String
     let color: Color
+    let isCrossed: Bool
+
+    init(id: String, symbol: String, title: String, help: String, color: Color, isCrossed: Bool = false) {
+        self.id = id
+        self.symbol = symbol
+        self.title = title
+        self.help = help
+        self.color = color
+        self.isCrossed = isCrossed
+    }
+}
+
+private struct DiagnosticSymbol: View {
+    let symbol: String
+    let color: Color
+    let size: CGFloat
+    let isCrossed: Bool
+
+    var body: some View {
+        ZStack {
+            Image(systemName: symbol)
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(color)
+
+            if isCrossed {
+                Capsule()
+                    .fill(color)
+                    .frame(width: size * 1.45, height: max(1.25, size * 0.14))
+                    .rotationEffect(.degrees(-42))
+            }
+        }
+        .frame(width: size * 1.25, height: size * 1.25)
+    }
 }
 
 private struct ArchitectureBadge: Identifiable {
@@ -519,52 +1152,63 @@ private struct ArchitectureBadge: Identifiable {
 private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBadge] {
     var badges: [DiagnosticBadge] = []
 
-    if report.isDebuggable {
+    if report.hasEntitlements {
         badges.append(
-            DiagnosticBadge(
-                id: "debuggable",
-                symbol: "ladybug.fill",
-                title: "Debuggable",
-                help: "The app has com.apple.security.get-task-allow and can be attached to by debugging tools.",
-                color: MacnosisTheme.debug
-            )
+            report.isDebuggable
+                ? DiagnosticBadge(
+                    id: "debuggable",
+                    symbol: "ladybug.fill",
+                    title: "Debuggable",
+                    help: "The app has com.apple.security.get-task-allow and can be attached to by debugging tools.",
+                    color: MacnosisTheme.debug
+                )
+                : DiagnosticBadge(
+                    id: "non-debuggable",
+                    symbol: "ladybug.fill",
+                    title: "Non-debuggable",
+                    help: "get-task-allow is not present, so debugger and memory tools may not be able to attach.",
+                    color: MacnosisTheme.neutral,
+                    isCrossed: true
+                )
         )
     }
 
-    switch report.gatekeeperStatus {
-    case .accepted:
-        badges.append(
-            DiagnosticBadge(
-                id: "gatekeeper-accepted",
-                symbol: "checkmark.seal.fill",
-                title: "Gatekeeper Accepted",
-                help: "Gatekeeper accepts this app for launch.",
-                color: MacnosisTheme.good
+    if report.hasGatekeeperAssessment {
+        switch report.gatekeeperStatus {
+        case .accepted:
+            badges.append(
+                DiagnosticBadge(
+                    id: "gatekeeper-accepted",
+                    symbol: "checkmark.seal.fill",
+                    title: "Gatekeeper Accepted",
+                    help: "Gatekeeper accepts this app for launch.",
+                    color: MacnosisTheme.good
+                )
             )
-        )
-    case .rejected:
-        badges.append(
-            DiagnosticBadge(
-                id: "gatekeeper-rejected",
-                symbol: "xmark.octagon.fill",
-                title: "Gatekeeper Rejected",
-                help: "Gatekeeper does not trust this app for normal launch/distribution.",
-                color: MacnosisTheme.warning
+        case .rejected:
+            badges.append(
+                DiagnosticBadge(
+                    id: "gatekeeper-rejected",
+                    symbol: "xmark.octagon.fill",
+                    title: "Gatekeeper Rejected",
+                    help: "Gatekeeper does not trust this app for normal launch/distribution.",
+                    color: MacnosisTheme.warning
+                )
             )
-        )
-    case .unknown:
-        badges.append(
-            DiagnosticBadge(
-                id: "gatekeeper-unknown",
-                symbol: "questionmark.circle.fill",
-                title: "Gatekeeper Unknown",
-                help: "Gatekeeper assessment did not clearly accept or reject the app.",
-                color: MacnosisTheme.neutral
+        case .unknown:
+            badges.append(
+                DiagnosticBadge(
+                    id: "gatekeeper-unknown",
+                    symbol: "questionmark.circle.fill",
+                    title: "Gatekeeper Unknown",
+                    help: "Gatekeeper assessment did not clearly accept or reject the app.",
+                    color: MacnosisTheme.neutral
+                )
             )
-        )
+        }
     }
 
-    if report.isQuarantined {
+    if report.hasExtendedAttributes && report.isQuarantined {
         badges.append(
             DiagnosticBadge(
                 id: "quarantined",
@@ -576,7 +1220,7 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
         )
     }
 
-    if report.isAdHocSigned {
+    if report.hasSigningDetails && report.isAdHocSigned {
         badges.append(
             DiagnosticBadge(
                 id: "ad-hoc",
@@ -586,7 +1230,7 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
                 color: MacnosisTheme.neutral
             )
         )
-    } else if report.hasDeveloperIDSignature {
+    } else if report.hasSigningDetails && report.hasDeveloperIDSignature {
         badges.append(
             DiagnosticBadge(
                 id: "developer-id",
@@ -598,7 +1242,7 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
         )
     }
 
-    if report.isSignatureValid == false {
+    if report.hasSignatureVerification && report.isSignatureValid == false {
         badges.append(
             DiagnosticBadge(
                 id: "signature-issue",
@@ -614,7 +1258,11 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
 }
 
 private func architectureBadges(for report: AppInspectionReport) -> [ArchitectureBadge] {
-    report.architectures.map { architecture in
+    guard report.hasExecutableFileDescription else {
+        return []
+    }
+
+    return report.architectures.map { architecture in
         switch architecture {
         case .universal:
             ArchitectureBadge(
@@ -647,6 +1295,22 @@ private func architectureBadges(for report: AppInspectionReport) -> [Architectur
                 title: "Intel 32-bit",
                 help: "Legacy Intel 32-bit binary. \(report.architectureSummary)",
                 color: MacnosisTheme.warning
+            )
+        case .script:
+            ArchitectureBadge(
+                id: "architecture-script",
+                glyph: "SH",
+                title: "Launcher Script",
+                help: "Script executable rather than a Mach-O binary. \(report.architectureSummary)",
+                color: MacnosisTheme.neutral
+            )
+        case .nonMachO:
+            ArchitectureBadge(
+                id: "architecture-non-mach-o",
+                glyph: "TXT",
+                title: "Non-Mach-O Executable",
+                help: "Executable is not a Mach-O binary. \(report.architectureSummary)",
+                color: MacnosisTheme.neutral
             )
         case .unknown:
             ArchitectureBadge(
@@ -786,74 +1450,75 @@ private struct QuickTipModifier: ViewModifier {
     }
 }
 
-private struct CommandSection: View {
+private struct CommandLogSection: View {
     let title: String
-    let result: CommandResult
+    let result: CommandResult?
 
     @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Text("exit \(result.exitCode)")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(result.exitCode == 0 ? MacnosisTheme.good : MacnosisTheme.warning)
-            }
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let result {
+                    Text(result.command.joined(separator: " "))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
 
-            Text(visibleOutput)
-                .font(.system(size: 11, design: .monospaced))
-                .textSelection(.enabled)
-                .foregroundStyle(.primary)
-                .lineLimit(isExpanded ? nil : 8)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(MacnosisTheme.panel)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if canExpand {
-                Button {
-                    isExpanded.toggle()
-                } label: {
-                    Label(isExpanded ? "Show Less" : "Show Full Output", systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                    Text(fullOutput)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .foregroundStyle(.primary)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                } else {
+                    Text("Still running.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .help(isExpanded ? "Collapse command output." : "Expand the complete command output.")
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: result == nil ? "clock" : result?.exitCode == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(logColor)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+                Text(logStatus)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(logColor)
             }
         }
-    }
-
-    private var visibleOutput: String {
-        let output = fullOutput
-        guard isExpanded == false else {
-            return output
-        }
-
-        return outputPreview(output)
+        .padding(10)
+        .background(MacnosisTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var fullOutput: String {
-        result.combinedOutput.isEmpty ? "No output." : result.combinedOutput
-    }
-
-    private var canExpand: Bool {
-        fullOutput.count > maxPreviewCharacters
-    }
-
-    private func outputPreview(_ output: String) -> String {
-        guard output.count > maxPreviewCharacters else {
-            return output
+        guard let result else {
+            return "Still running."
         }
 
-        let preview = String(output.prefix(maxPreviewCharacters))
-        return preview + "\n..."
+        return result.combinedOutput.isEmpty ? "No output." : result.combinedOutput
     }
 
-    private var maxPreviewCharacters: Int {
-        1600
+    private var logStatus: String {
+        guard let result else {
+            return "pending"
+        }
+
+        return "exit \(result.exitCode)"
+    }
+
+    private var logColor: Color {
+        guard let result else {
+            return MacnosisTheme.neutral
+        }
+
+        return result.exitCode == 0 ? MacnosisTheme.good : MacnosisTheme.warning
     }
 }
