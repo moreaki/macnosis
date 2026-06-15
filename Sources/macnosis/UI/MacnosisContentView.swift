@@ -3,7 +3,9 @@ import SwiftUI
 
 struct MacnosisContentView: View {
     @ObservedObject var model: MacnosisAppModel
+    let onQuit: () -> Void
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
+    @State private var headerHint: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,15 +45,36 @@ struct MacnosisContentView: View {
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 
-            ToolbarIconButton(
-                symbol: "folder.badge.plus",
-                label: "Inspect Apps",
-                action: model.chooseApp
-            )
+            Text(headerHint ?? "")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 92, alignment: .trailing)
+                .animation(.easeInOut(duration: 0.12), value: headerHint)
+
+            HStack(spacing: 6) {
+                ToolbarIconButton(
+                    symbol: "folder.badge.plus",
+                    label: "Inspect Apps",
+                    onHoverLabel: setHeaderHint,
+                    action: model.chooseApp
+                )
+
+                ToolbarIconButton(
+                    symbol: "power",
+                    label: "Quit Macnosis",
+                    onHoverLabel: setHeaderHint,
+                    action: onQuit
+                )
+            }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
         .animation(.easeInOut(duration: 0.18), value: model.activeInspectionCount)
+    }
+
+    private func setHeaderHint(_ hint: String?) {
+        headerHint = hint
     }
 
     @ViewBuilder
@@ -142,6 +165,7 @@ struct MacnosisContentView: View {
 private struct ToolbarIconButton: View {
     let symbol: String
     let label: String
+    var onHoverLabel: (String?) -> Void = { _ in }
     let action: () -> Void
 
     @State private var isHovered = false
@@ -156,14 +180,17 @@ private struct ToolbarIconButton: View {
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(.isButton)
-        .help(label)
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) {
-                isHovered = hovering
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(.isButton)
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHovered = hovering
+                }
+                onHoverLabel(hovering ? label : nil)
             }
-        }
+            .onDisappear {
+                onHoverLabel(nil)
+            }
     }
 }
 

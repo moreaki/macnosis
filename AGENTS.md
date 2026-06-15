@@ -52,6 +52,7 @@ Treat it as a focused desktop diagnostic tool first. The primary UX goal is calm
 - Cancel delayed hover work when the pointer leaves, and hide hover state on focus loss.
 - Tooltips and popovers must work in both light and dark themes with readable contrast.
 - Avoid oversized pointer callouts that cover the content the user is inspecting.
+- Keep hover helpers out of the click path for toolbar controls. A tooltip/popover wrapper around an icon button can consume the first click or reintroduce focus styling; use passive hover text or a control-owned tooltip instead.
 
 ## Visual Style
 
@@ -69,6 +70,7 @@ Treat it as a focused desktop diagnostic tool first. The primary UX goal is calm
 - Do not rely on color alone for meaning where text, icon shape, or status wording can clarify the state.
 - Keep hit targets comfortable for sidebar rows, toolbar icons, repair actions, and disclosure controls.
 - Provide useful labels/tooltips for icon-only actions.
+- For macOS app UI testing, confirm the tested window is key and the app is frontmost before judging click behavior. A visible but inactive window may consume the first click for activation instead of invoking the target control.
 - Keep visible strings consistent and ready to localize. If localization resources are introduced, all new UI text should go through them rather than being scattered through views.
 
 ## Verification
@@ -91,5 +93,13 @@ open .build/Macnosis.app
 sleep 1
 pgrep -x Macnosis
 ```
+
+After relaunch, confirm the app is frontmost before testing app-chrome controls such as Quit:
+
+```bash
+osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'
+```
+
+If the expected app is not frontmost, fix activation/window ordering in the app or test harness instead of adding extra click handlers or control-specific workarounds.
 
 Inspect the real app after relaunch for layout-sensitive SwiftUI changes. Do not rely only on code review for spacing, hover states, icon rendering, text clipping, overlap, focus highlights, resizable split views, light/dark contrast, or incremental loading behavior.
