@@ -10,6 +10,7 @@ public struct AppInspectionReport: Equatable, Sendable {
     public let executableName: String?
     public let executableURL: URL?
     public var executableFileDescription: String?
+    public var executableFileDescriptionResult: CommandResult?
     public var signingDetails: CommandResult?
     public var entitlements: CommandResult?
     public var signatureVerification: CommandResult?
@@ -26,6 +27,7 @@ public struct AppInspectionReport: Equatable, Sendable {
         executableName: String?,
         executableURL: URL?,
         executableFileDescription: String?,
+        executableFileDescriptionResult: CommandResult? = nil,
         signingDetails: CommandResult? = nil,
         entitlements: CommandResult? = nil,
         signatureVerification: CommandResult? = nil,
@@ -41,6 +43,7 @@ public struct AppInspectionReport: Equatable, Sendable {
         self.executableName = executableName
         self.executableURL = executableURL
         self.executableFileDescription = executableFileDescription
+        self.executableFileDescriptionResult = executableFileDescriptionResult
         self.signingDetails = signingDetails
         self.entitlements = entitlements
         self.signatureVerification = signatureVerification
@@ -49,50 +52,61 @@ public struct AppInspectionReport: Equatable, Sendable {
     }
 
     public var hasExecutableFileDescription: Bool {
-        executableFileDescription != nil
+        executableFileDescriptionAvailability == .available
     }
 
     public var hasSigningDetails: Bool {
-        signingDetails != nil
+        signingDetailsAvailability == .available
     }
 
     public var hasEntitlements: Bool {
-        entitlements != nil
+        debuggingStatus == .debuggable || debuggingStatus == .notDebuggable
     }
 
     public var hasSignatureVerification: Bool {
-        signatureVerification != nil
+        signatureVerificationStatus == .valid || signatureVerificationStatus == .invalid
     }
 
     public var hasGatekeeperAssessment: Bool {
-        gatekeeperAssessment != nil
+        switch gatekeeperStatus {
+        case .accepted, .rejected, .unknown:
+            return true
+        case .pending, .unavailable:
+            return false
+        }
     }
 
     public var hasExtendedAttributes: Bool {
-        extendedAttributes != nil
+        quarantineStatus == .quarantined || quarantineStatus == .clear
     }
 
     public var isFullyInspected: Bool {
-        let executableIsResolved = executableURL == nil || hasExecutableFileDescription
+        let executableIsResolved = executableURL == nil
+            || executableFileDescription != nil
+            || executableFileDescriptionResult != nil
         return executableIsResolved
-            && hasSigningDetails
-            && hasEntitlements
-            && hasSignatureVerification
-            && hasGatekeeperAssessment
-            && hasExtendedAttributes
+            && signingDetails != nil
+            && entitlements != nil
+            && signatureVerification != nil
+            && gatekeeperAssessment != nil
+            && extendedAttributes != nil
     }
 
     public var isQuarantined: Bool {
-        extendedAttributes?.combinedOutput.contains("com.apple.quarantine") == true
+        quarantineStatus == .quarantined
     }
 
     public var isSignatureValid: Bool {
-        signatureVerification?.exitCode == 0
+        signatureVerificationStatus == .valid
     }
 
     public var gatekeeperStatus: GatekeeperStatus {
         guard let gatekeeperAssessment else {
-            return .unknown
+            return .pending
+        }
+
+        guard gatekeeperAssessment.didExit else {
+            return .unavailable
         }
 
         let output = gatekeeperAssessment.combinedOutput
@@ -145,7 +159,90 @@ public struct AppInspectionReport: Equatable, Sendable {
     }
 
     public var isDebuggable: Bool {
-        entitlements?.combinedOutput.contains("com.apple.security.get-task-allow") == true
+        debuggingStatus == .debuggable
+    }
+
+    public var executableFileDescriptionAvailability: DiagnosticAvailability {
+        if executableFileDescription != nil {
+            return .available
+        }
+
+        guard let executableFileDescriptionResult else {
+            return .pending
+        }
+
+        return executableFileDescriptionResult.succeeded ? .available : .unavailable
+    }
+
+    public var signingDetailsAvailability: DiagnosticAvailability {
+        guard let signingDetails else {
+            return .pending
+        }
+
+        guard signingDetails.didExit,
+              signingDetails.standardOutputWasTruncated == false,
+              signingDetails.standardErrorWasTruncated == false
+        else {
+            return .unavailable
+        }
+
+        return .available
+    }
+
+    public var signatureVerificationStatus: SignatureVerificationStatus {
+        guard let signatureVerification else {
+            return .pending
+        }
+
+        guard signatureVerification.didExit else {
+            return .unavailable
+        }
+
+        return signatureVerification.succeeded ? .valid : .invalid
+    }
+
+    public var quarantineStatus: QuarantineStatus {
+        guard let extendedAttributes else {
+            return .pending
+        }
+
+        guard extendedAttributes.succeeded else {
+            return .unavailable
+        }
+
+        if extendedAttributes.combinedOutput.contains("com.apple.quarantine") {
+            return .quarantined
+        }
+
+        return extendedAttributes.standardOutputWasTruncated || extendedAttributes.standardErrorWasTruncated
+            ? .unavailable
+            : .clear
+    }
+
+    public var debuggingStatus: DebuggabilityStatus {
+        guard let entitlements else {
+            return .pending
+        }
+
+        guard entitlements.succeeded,
+              entitlements.standardOutputWasTruncated == false,
+              entitlements.standardErrorWasTruncated == false
+        else {
+            return .unavailable
+        }
+
+        let output = entitlements.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard output.isEmpty == false else {
+            return .notDebuggable
+        }
+
+        guard let entitlementDictionary = propertyListDictionary(from: output) else {
+            return .malformed
+        }
+
+        return entitlementDictionary["com.apple.security.get-task-allow"] as? Bool == true
+            ? .debuggable
+            : .notDebuggable
     }
 
     public var architectureSummary: String {
@@ -233,10 +330,23 @@ public struct AppInspectionReport: Equatable, Sendable {
         return trimmedValue.isEmpty ? nil : trimmedValue
     }
 
+    private func propertyListDictionary(from output: String) -> [String: Any]? {
+        guard let data = output.data(using: .utf8),
+              let propertyList = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        else {
+            return nil
+        }
+
+        return propertyList as? [String: Any]
+    }
+
     public mutating func apply(_ result: AppInspectionCommandResult) {
         switch result.command {
         case .executableFileDescription:
-            executableFileDescription = result.result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            executableFileDescriptionResult = result.result
+            executableFileDescription = result.result.succeeded
+                ? result.result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                : nil
         case .signingDetails:
             signingDetails = result.result
         case .entitlements:
@@ -271,9 +381,39 @@ public struct AppInspectionCommandResult: Equatable, Sendable {
 }
 
 public enum GatekeeperStatus: Equatable, Sendable {
+    case pending
     case accepted
     case rejected
     case unknown
+    case unavailable
+}
+
+public enum DiagnosticAvailability: Equatable, Sendable {
+    case pending
+    case available
+    case unavailable
+}
+
+public enum SignatureVerificationStatus: Equatable, Sendable {
+    case pending
+    case valid
+    case invalid
+    case unavailable
+}
+
+public enum QuarantineStatus: Equatable, Sendable {
+    case pending
+    case quarantined
+    case clear
+    case unavailable
+}
+
+public enum DebuggabilityStatus: Equatable, Sendable {
+    case pending
+    case debuggable
+    case notDebuggable
+    case malformed
+    case unavailable
 }
 
 public enum AppArchitecture: Equatable, Sendable {
@@ -286,17 +426,75 @@ public enum AppArchitecture: Equatable, Sendable {
     case unknown
 }
 
+public enum CommandTermination: Equatable, Sendable {
+    case exited(Int32)
+    case timedOut(seconds: Int)
+    case failedToLaunch
+}
+
 public struct CommandResult: Equatable, Sendable {
     public let command: [String]
-    public let exitCode: Int32
+    public let termination: CommandTermination
     public let standardOutput: String
     public let standardError: String
+    public let standardOutputWasTruncated: Bool
+    public let standardErrorWasTruncated: Bool
 
-    public init(command: [String], exitCode: Int32, standardOutput: String, standardError: String) {
+    public init(
+        command: [String],
+        exitCode: Int32,
+        standardOutput: String,
+        standardError: String,
+        standardOutputWasTruncated: Bool = false,
+        standardErrorWasTruncated: Bool = false
+    ) {
+        self.init(
+            command: command,
+            termination: .exited(exitCode),
+            standardOutput: standardOutput,
+            standardError: standardError,
+            standardOutputWasTruncated: standardOutputWasTruncated,
+            standardErrorWasTruncated: standardErrorWasTruncated
+        )
+    }
+
+    public init(
+        command: [String],
+        termination: CommandTermination,
+        standardOutput: String,
+        standardError: String,
+        standardOutputWasTruncated: Bool = false,
+        standardErrorWasTruncated: Bool = false
+    ) {
         self.command = command
-        self.exitCode = exitCode
+        self.termination = termination
         self.standardOutput = standardOutput
         self.standardError = standardError
+        self.standardOutputWasTruncated = standardOutputWasTruncated
+        self.standardErrorWasTruncated = standardErrorWasTruncated
+    }
+
+    public var exitCode: Int32 {
+        switch termination {
+        case .exited(let exitCode):
+            return exitCode
+        case .timedOut:
+            return 124
+        case .failedToLaunch:
+            return 127
+        }
+    }
+
+    public var didExit: Bool {
+        if case .exited = termination {
+            return true
+        }
+
+        return false
+    }
+
+    public var succeeded: Bool {
+        termination == .exited(0)
     }
 
     public var combinedOutput: String {

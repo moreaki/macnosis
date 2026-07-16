@@ -7,21 +7,46 @@ enum AppRepairOperation: Sendable {
     case repairDamagedInPlace
 }
 
+protocol AppRepairServicing: Sendable {
+    func run(_ operation: AppRepairOperation, appURL: URL) -> CommandResult
+    func debuggableCopyURL(for appURL: URL) -> URL
+}
+
 struct AppRepairService: Sendable {
+    private let commandExecutor: CommandExecutor
+    private let quarantineTimeout: TimeInterval
+    private let signingTimeout: TimeInterval
+
+    init(
+        commandExecutor: CommandExecutor = CommandExecutor(),
+        quarantineTimeout: TimeInterval = 60,
+        signingTimeout: TimeInterval = 300
+    ) {
+        self.commandExecutor = commandExecutor
+        self.quarantineTimeout = quarantineTimeout
+        self.signingTimeout = signingTimeout
+    }
+
     func run(_ operation: AppRepairOperation, appURL: URL) -> CommandResult {
         switch operation {
         case .clearQuarantine:
-            return runCommand(["/usr/bin/xattr", "-dr", "com.apple.quarantine", appURL.path])
+            return commandExecutor.run(
+                ["/usr/bin/xattr", "-dr", "com.apple.quarantine", appURL.path],
+                timeout: quarantineTimeout
+            )
         case .createDebuggableCopy:
             guard let scriptURL = makeDebuggableScriptURL else {
                 return missingScriptResult
             }
-            return runCommand([scriptURL.path, appURL.path])
+            return commandExecutor.run([scriptURL.path, appURL.path], timeout: signingTimeout)
         case .repairDamagedInPlace:
             guard let scriptURL = makeDebuggableScriptURL else {
                 return missingScriptResult
             }
-            return runCommand([scriptURL.path, "--repair-damaged", appURL.path])
+            return commandExecutor.run(
+                [scriptURL.path, "--repair-damaged", appURL.path],
+                timeout: signingTimeout
+            )
         }
     }
 
@@ -44,39 +69,11 @@ struct AppRepairService: Sendable {
     private var missingScriptResult: CommandResult {
         CommandResult(
             command: ["scripts/make-debuggable-app.sh"],
-            exitCode: 127,
+            termination: .failedToLaunch,
             standardOutput: "",
             standardError: "Missing bundled repair script."
         )
     }
-
-    private func runCommand(_ command: [String]) -> CommandResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: command[0])
-        process.arguments = Array(command.dropFirst())
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return CommandResult(
-                command: command,
-                exitCode: 127,
-                standardOutput: "",
-                standardError: String(describing: error)
-            )
-        }
-
-        return CommandResult(
-            command: command,
-            exitCode: process.terminationStatus,
-            standardOutput: String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-            standardError: String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        )
-    }
 }
+
+extension AppRepairService: AppRepairServicing {}

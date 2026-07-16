@@ -12,16 +12,29 @@ final class MacnosisAppModel: ObservableObject {
     @Published var selectedAppID: InspectedApp.ID?
     @Published var isDropTargeted = false
 
-    private let inspector = AppBundleInspector()
+    private let inspector: any AppBundleInspecting
     private let appBundlePicker: AppBundlePicking
-    private let repairService = AppRepairService()
+    private let repairService: any AppRepairServicing
+    private let appBundleDiscovery: AppBundleDiscovery
     private let commandRunner = InspectionCommandRunner(
         maxConcurrentLightCommands: maxConcurrentLightInspectionCommands,
         maxConcurrentDeepCommands: maxConcurrentDeepInspectionCommands
     )
+    private var inspectionGenerations: [InspectedApp.ID: UUID] = [:]
+    private var inspectionTasks: [InspectedApp.ID: Task<Void, Never>] = [:]
+    private var repairGenerations: [InspectedApp.ID: UUID] = [:]
+    private var discoveryTasks: [UUID: Task<Void, Never>] = [:]
 
-    init(appBundlePicker: AppBundlePicking = AppBundleOpenPanel()) {
+    init(
+        appBundlePicker: AppBundlePicking = AppBundleOpenPanel(),
+        inspector: any AppBundleInspecting = AppBundleInspector(),
+        repairService: any AppRepairServicing = AppRepairService(),
+        appBundleDiscovery: AppBundleDiscovery = AppBundleDiscovery()
+    ) {
         self.appBundlePicker = appBundlePicker
+        self.inspector = inspector
+        self.repairService = repairService
+        self.appBundleDiscovery = appBundleDiscovery
     }
 
     func chooseApp() {
@@ -35,6 +48,10 @@ final class MacnosisAppModel: ObservableObject {
     private func inspectAppBundle(_ url: URL) {
         let normalizedURL = url.standardizedFileURL
         let id = normalizedURL.path
+        let generation = UUID()
+        inspectionTasks[id]?.cancel()
+        inspectionTasks[id] = nil
+        inspectionGenerations[id] = generation
         selectedAppID = id
 
         let initialReport: AppInspectionReport
@@ -42,6 +59,7 @@ final class MacnosisAppModel: ObservableObject {
             initialReport = try inspector.initialReport(bundleURL: normalizedURL)
         } catch {
             upsertApp(id: id, url: normalizedURL, report: nil, errorMessage: error.localizedDescription, isInspecting: false)
+            inspectionGenerations[id] = nil
             return
         }
 
@@ -51,18 +69,58 @@ final class MacnosisAppModel: ObservableObject {
         let remainingCommands = commands.filter { $0.isFastSummaryCommand == false }
         let commandRunner = commandRunner
 
-        Task.detached { [inspector] in
-            await self.run(fastCommands, for: initialReport, inspector: inspector, commandRunner: commandRunner, id: id)
-            await self.run(remainingCommands, for: initialReport, inspector: inspector, commandRunner: commandRunner, id: id)
+        let task = Task.detached { [weak self, inspector] in
+            guard let self else {
+                return
+            }
+
+            await self.run(
+                fastCommands,
+                for: initialReport,
+                inspector: inspector,
+                commandRunner: commandRunner,
+                id: id,
+                generation: generation
+            )
+            await self.run(
+                remainingCommands,
+                for: initialReport,
+                inspector: inspector,
+                commandRunner: commandRunner,
+                id: id,
+                generation: generation
+            )
             await MainActor.run {
-                self.finishInspection(id: id)
+                self.finishInspection(id: id, generation: generation)
             }
         }
+        inspectionTasks[id] = task
     }
 
     func inspect(_ urls: [URL]) {
-        Self.appBundleURLs(in: urls)
-            .forEach(inspectAppBundle)
+        let taskID = UUID()
+        let discovery = appBundleDiscovery
+        let task = Task { [weak self] in
+            let worker = Task.detached { [weak self, discovery] in
+                await discovery.discover(in: urls) { [weak self] batch in
+                    await MainActor.run {
+                        guard let self else {
+                            return
+                        }
+
+                        batch.forEach(self.inspectAppBundle)
+                    }
+                }
+            }
+
+            await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            self?.discoveryTasks[taskID] = nil
+        }
+        discoveryTasks[taskID] = task
     }
 
     func selectApp(id: InspectedApp.ID) {
@@ -70,6 +128,10 @@ final class MacnosisAppModel: ObservableObject {
     }
 
     func closeApp(id: InspectedApp.ID) {
+        inspectionTasks[id]?.cancel()
+        inspectionTasks[id] = nil
+        inspectionGenerations[id] = nil
+        repairGenerations[id] = nil
         inspectedApps.removeAll { $0.id == id }
 
         if selectedAppID == id {
@@ -117,33 +179,52 @@ final class MacnosisAppModel: ObservableObject {
         }
     }
 
-    private func updateInspection(id: InspectedApp.ID, with result: AppInspectionCommandResult) {
-        guard let index = inspectedApps.firstIndex(where: { $0.id == id }) else {
+    private func updateInspection(
+        id: InspectedApp.ID,
+        generation: UUID,
+        with result: AppInspectionCommandResult
+    ) {
+        guard inspectionGenerations[id] == generation,
+              let index = inspectedApps.firstIndex(where: { $0.id == id })
+        else {
             return
         }
 
         inspectedApps[index].report?.apply(result)
     }
 
-    private func finishInspection(id: InspectedApp.ID) {
-        guard let index = inspectedApps.firstIndex(where: { $0.id == id }) else {
+    private func finishInspection(id: InspectedApp.ID, generation: UUID) {
+        guard inspectionGenerations[id] == generation,
+              let index = inspectedApps.firstIndex(where: { $0.id == id })
+        else {
             return
         }
 
         inspectedApps[index].isInspecting = false
+        inspectionTasks[id] = nil
+        inspectionGenerations[id] = nil
     }
 
     nonisolated private func run(
         _ commands: [AppInspectionCommand],
         for report: AppInspectionReport,
-        inspector: AppBundleInspector,
+        inspector: any AppBundleInspecting,
         commandRunner: InspectionCommandRunning,
-        id: InspectedApp.ID
+        id: InspectedApp.ID,
+        generation: UUID
     ) async {
-        await withTaskGroup(of: AppInspectionCommandResult.self) { group in
+        guard Task.isCancelled == false else {
+            return
+        }
+
+        await withTaskGroup(of: AppInspectionCommandResult?.self) { group in
             for command in commands {
                 group.addTask {
-                    await commandRunner.run(command, for: report, using: inspector) { lane, isActive in
+                    guard Task.isCancelled == false else {
+                        return nil
+                    }
+
+                    return await commandRunner.run(command, for: report, using: inspector) { lane, isActive in
                         await MainActor.run {
                             self.updateActiveCommandCount(for: lane, isActive: isActive)
                         }
@@ -152,8 +233,12 @@ final class MacnosisAppModel: ObservableObject {
             }
 
             for await result in group {
+                guard let result, Task.isCancelled == false else {
+                    continue
+                }
+
                 await MainActor.run {
-                    self.updateInspection(id: id, with: result)
+                    self.updateInspection(id: id, generation: generation, with: result)
                 }
             }
         }
@@ -181,29 +266,46 @@ final class MacnosisAppModel: ObservableObject {
     }
 
     private func runRepair(_ operation: AppRepairOperation, for id: InspectedApp.ID) {
-        guard let app = inspectedApps.first(where: { $0.id == id }) else {
+        guard let app = inspectedApps.first(where: { $0.id == id }), app.isRepairing == false else {
             return
         }
 
-        setRepairState(id: id, isRepairing: true, message: "Running repair action...")
+        let generation = UUID()
+        repairGenerations[id] = generation
+        setRepairState(id: id, isRepairing: true, message: nil)
         let appURL = app.url
         let repairService = repairService
 
         Task.detached {
             let result = repairService.run(operation, appURL: appURL)
             await MainActor.run {
-                self.finishRepair(operation, sourceURL: appURL, result: result)
+                self.finishRepair(operation, sourceURL: appURL, generation: generation, result: result)
             }
         }
     }
 
-    private func finishRepair(_ operation: AppRepairOperation, sourceURL: URL, result: CommandResult) {
+    private func finishRepair(
+        _ operation: AppRepairOperation,
+        sourceURL: URL,
+        generation: UUID,
+        result: CommandResult
+    ) {
         let id = sourceURL.standardizedFileURL.path
-        let succeeded = result.exitCode == 0
+        guard repairGenerations[id] == generation,
+              inspectedApps.contains(where: { $0.id == id })
+        else {
+            return
+        }
+
+        repairGenerations[id] = nil
+        let succeeded = result.succeeded
         setRepairState(
             id: id,
             isRepairing: false,
-            message: succeeded ? "Repair action completed." : result.combinedOutput
+            message: AppActionMessage(
+                text: succeeded ? "Repair action completed." : result.combinedOutput,
+                isError: succeeded == false
+            )
         )
 
         switch operation {
@@ -216,7 +318,7 @@ final class MacnosisAppModel: ObservableObject {
         }
     }
 
-    private func setRepairState(id: InspectedApp.ID, isRepairing: Bool, message: String?) {
+    private func setRepairState(id: InspectedApp.ID, isRepairing: Bool, message: AppActionMessage?) {
         guard let index = inspectedApps.firstIndex(where: { $0.id == id }) else {
             return
         }
@@ -226,53 +328,21 @@ final class MacnosisAppModel: ObservableObject {
     }
 }
 
-private extension MacnosisAppModel {
-    nonisolated static func appBundleURLs(in urls: [URL]) -> [URL] {
-        var seenPaths = Set<String>()
-        var resolvedAppBundleURLs: [URL] = []
-
-        for url in urls {
-            for appBundleURL in appBundleURLs(in: url.standardizedFileURL) {
-                let path = appBundleURL.path
-                guard seenPaths.insert(path).inserted else {
-                    continue
-                }
-
-                resolvedAppBundleURLs.append(appBundleURL)
-            }
-        }
-
-        return resolvedAppBundleURLs
-    }
-
-    nonisolated static func appBundleURLs(in url: URL) -> [URL] {
-        if url.isAppBundlePath {
-            return [url]
-        }
-
-        guard url.isDirectory else {
-            return []
-        }
-
-        let children = (try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        return children
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            .flatMap(appBundleURLs)
-    }
+protocol AppBundleInspecting: Sendable {
+    func initialReport(bundleURL: URL) throws -> AppInspectionReport
+    func inspectionCommands(for report: AppInspectionReport) -> [AppInspectionCommand]
+    func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult
 }
+
+extension AppBundleInspector: AppBundleInspecting {}
 
 private protocol InspectionCommandRunning: Sendable {
     func run(
         _ command: AppInspectionCommand,
         for report: AppInspectionReport,
-        using inspector: AppBundleInspector,
+        using inspector: any AppBundleInspecting,
         activity: @escaping @Sendable (InspectionCommandLane, Bool) async -> Void
-    ) async -> AppInspectionCommandResult
+    ) async -> AppInspectionCommandResult?
 }
 
 private enum InspectionCommandLane: Sendable {
@@ -292,17 +362,26 @@ private final class InspectionCommandRunner: InspectionCommandRunning, @unchecke
     func run(
         _ command: AppInspectionCommand,
         for report: AppInspectionReport,
-        using inspector: AppBundleInspector,
+        using inspector: any AppBundleInspecting,
         activity: @escaping @Sendable (InspectionCommandLane, Bool) async -> Void
-    ) async -> AppInspectionCommandResult {
+    ) async -> AppInspectionCommandResult? {
+        guard Task.isCancelled == false else {
+            return nil
+        }
+
         let lane = command.inspectionLane
         let semaphore = lane == .deep ? deepSemaphore : lightSemaphore
         await semaphore.wait()
+        guard Task.isCancelled == false else {
+            await semaphore.signal()
+            return nil
+        }
+
         await activity(lane, true)
         let result = inspector.run(command, for: report)
         await activity(lane, false)
         await semaphore.signal()
-        return result
+        return Task.isCancelled ? nil : result
     }
 }
 
@@ -349,16 +428,6 @@ private extension AppInspectionCommand {
     }
 }
 
-private extension URL {
-    var isAppBundlePath: Bool {
-        pathExtension.caseInsensitiveCompare("app") == .orderedSame
-    }
-
-    var isDirectory: Bool {
-        (try? resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-    }
-}
-
 struct InspectedApp: Identifiable, Equatable {
     let id: String
     let url: URL
@@ -366,7 +435,7 @@ struct InspectedApp: Identifiable, Equatable {
     var errorMessage: String?
     var isInspecting: Bool
     var isRepairing: Bool
-    var actionMessage: String?
+    var actionMessage: AppActionMessage?
 
     var displayName: String {
         packageName
@@ -389,26 +458,29 @@ struct InspectedApp: Identifiable, Equatable {
             return isInspecting ? "Inspecting" : "Queued"
         }
 
-        if report.hasEntitlements && report.isDebuggable {
+        if report.debuggingStatus == .debuggable {
             return "Debuggable"
         }
 
-        if report.hasGatekeeperAssessment {
-            switch report.gatekeeperStatus {
-            case .accepted:
-                return report.hasExtendedAttributes && report.isQuarantined ? "Accepted, Quarantined" : "Accepted"
-            case .rejected:
-                return "Gatekeeper Rejected"
-            case .unknown:
-                break
-            }
+        switch report.gatekeeperStatus {
+        case .accepted:
+            return report.quarantineStatus == .quarantined ? "Accepted, Quarantined" : "Accepted"
+        case .rejected:
+            return "Gatekeeper Rejected"
+        case .pending, .unknown, .unavailable:
+            break
         }
 
-        if report.hasSignatureVerification {
-            return report.isSignatureValid ? "Checked" : "Signature Issue"
+        switch report.signatureVerificationStatus {
+        case .valid:
+            return "Checked"
+        case .invalid:
+            return "Signature Issue"
+        case .pending:
+            return isInspecting ? "Checking" : "Checked"
+        case .unavailable:
+            return "Inspection Incomplete"
         }
-
-        return isInspecting ? "Checking" : "Checked"
     }
 
     var hasWarning: Bool {
@@ -417,8 +489,13 @@ struct InspectedApp: Identifiable, Equatable {
         }
 
         return errorMessage != nil
-            || (report.hasSignatureVerification && report.isSignatureValid == false)
-            || (report.hasGatekeeperAssessment && report.gatekeeperStatus == .rejected)
-            || (report.hasExtendedAttributes && report.isQuarantined)
+            || report.signatureVerificationStatus == .invalid
+            || report.gatekeeperStatus == .rejected
+            || report.quarantineStatus == .quarantined
     }
+}
+
+struct AppActionMessage: Equatable {
+    let text: String
+    let isError: Bool
 }

@@ -477,7 +477,7 @@ private struct InspectionReportView: View {
                 detailGrid
                 diagnosticPanels
                 if let actionMessage = app.actionMessage {
-                    ActionMessageView(message: actionMessage, isError: actionMessage.contains("error") || actionMessage.contains("failed"))
+                    ActionMessageView(message: actionMessage.text, isError: actionMessage.isError)
                 }
                 technicalLogs
             }
@@ -554,7 +554,7 @@ private struct InspectionReportView: View {
                 status: signatureStatusText,
                 tone: signatureTone,
                 message: signingMessage,
-                actionTitle: report.hasSignatureVerification && report.isSignatureValid == false ? "Repair In Place" : nil,
+                actionTitle: report.signatureVerificationStatus == .invalid ? "Repair In Place" : nil,
                 isWorking: app.isRepairing,
                 action: { pendingAction = .repairDamagedInPlace }
             )
@@ -576,7 +576,7 @@ private struct InspectionReportView: View {
                 status: gatekeeperStatusText,
                 tone: gatekeeperTone,
                 message: gatekeeperMessage,
-                actionTitle: report.hasGatekeeperAssessment && report.gatekeeperStatus == .rejected ? "Repair In Place" : nil,
+                actionTitle: report.gatekeeperStatus == .rejected ? "Repair In Place" : nil,
                 isWorking: app.isRepairing,
                 action: { pendingAction = .repairDamagedInPlace }
             )
@@ -587,19 +587,19 @@ private struct InspectionReportView: View {
                 status: quarantineStatusText,
                 tone: quarantineTone,
                 message: quarantineMessage,
-                actionTitle: report.hasExtendedAttributes && report.isQuarantined ? "Clear Quarantine" : nil,
+                actionTitle: report.quarantineStatus == .quarantined ? "Clear Quarantine" : nil,
                 isWorking: app.isRepairing,
                 action: { pendingAction = .clearQuarantine }
             )
 
             DiagnosticPanel(
                 symbol: "ladybug.fill",
-                isSymbolCrossed: report.hasEntitlements && report.isDebuggable == false,
+                isSymbolCrossed: report.debuggingStatus == .notDebuggable,
                 title: "Debugging",
                 status: debuggingStatusText,
                 tone: debuggingTone,
                 message: debuggingMessage,
-                actionTitle: report.hasEntitlements && report.isDebuggable == false ? "Create Debug Copy" : nil,
+                actionTitle: report.debuggingStatus == .notDebuggable ? "Create Debug Copy" : nil,
                 isWorking: app.isRepairing,
                 action: { pendingAction = .createDebuggableCopy }
             )
@@ -626,10 +626,14 @@ private struct InspectionReportView: View {
         GridRow {
             Text("Architecture")
                 .foregroundStyle(.secondary)
-            if report.hasExecutableFileDescription {
+            switch report.executableFileDescriptionAvailability {
+            case .available:
                 ArchitecturePillStack(badges: architectureBadges(for: report))
-            } else {
+            case .pending:
                 Text("Checking")
+                    .foregroundStyle(.secondary)
+            case .unavailable:
+                Text("Unknown")
                     .foregroundStyle(.secondary)
             }
         }
@@ -649,202 +653,222 @@ private struct InspectionReportView: View {
     }
 
     private var signatureSymbol: String {
-        guard report.hasSignatureVerification else {
-            return "clock"
+        switch report.signatureVerificationStatus {
+        case .pending: "clock"
+        case .valid: "checkmark.seal.fill"
+        case .invalid: "signature"
+        case .unavailable: "questionmark.circle.fill"
         }
-
-        return report.isSignatureValid ? "checkmark.seal.fill" : "signature"
     }
 
     private var signatureStatusText: String {
-        guard report.hasSignatureVerification else {
-            return "Checking"
+        switch report.signatureVerificationStatus {
+        case .pending: "Checking"
+        case .valid: "Valid on disk"
+        case .invalid: "Signature issue"
+        case .unavailable: "Unavailable"
         }
-
-        return report.isSignatureValid ? "Valid on disk" : "Signature issue"
     }
 
     private var signatureTone: DiagnosticTone {
-        guard report.hasSignatureVerification else {
-            return .neutral
+        switch report.signatureVerificationStatus {
+        case .pending, .unavailable: .neutral
+        case .valid: .good
+        case .invalid: .warning
         }
-
-        return report.isSignatureValid ? .good : .warning
     }
 
     private var signingMessage: String {
-        guard report.hasSignatureVerification else {
+        switch report.signatureVerificationStatus {
+        case .pending:
             return "Strict code signature verification is still running."
-        }
-
-        if report.isSignatureValid {
+        case .valid:
             return report.isAdHocSigned ? "The local ad-hoc signature is structurally valid." : "The bundle satisfies strict code signature verification."
+        case .invalid:
+            return "Strict verification confirmed a signature problem. Re-signing can repair stale or missing bundle seals."
+        case .unavailable:
+            return "Signature verification did not complete. Review the technical log before taking action."
         }
-
-        return "Strict verification failed. Re-signing can repair stale or missing bundle seals."
     }
 
     private var developerIDSymbol: String {
-        guard report.hasSigningDetails else {
+        switch report.signingDetailsAvailability {
+        case .pending:
             return "clock"
-        }
+        case .unavailable:
+            return "questionmark.circle.fill"
+        case .available:
+            if report.hasDeveloperIDSignature {
+                return "person.crop.circle.badge.checkmark"
+            }
 
-        if report.hasDeveloperIDSignature {
-            return "person.crop.circle.badge.checkmark"
+            return report.isAdHocSigned ? "signature" : "person.crop.circle.badge.xmark"
         }
-
-        return report.isAdHocSigned ? "signature" : "person.crop.circle.badge.xmark"
     }
 
     private var developerIDStatusText: String {
-        guard report.hasSigningDetails else {
+        switch report.signingDetailsAvailability {
+        case .pending:
             return "Checking"
-        }
+        case .unavailable:
+            return "Unavailable"
+        case .available:
+            if report.hasDeveloperIDSignature {
+                return "Present"
+            }
 
-        if report.hasDeveloperIDSignature {
-            return "Present"
+            return report.isAdHocSigned ? "Ad-hoc only" : "Not present"
         }
-
-        return report.isAdHocSigned ? "Ad-hoc only" : "Not present"
     }
 
     private var developerIDTone: DiagnosticTone {
-        guard report.hasSigningDetails else {
+        switch report.signingDetailsAvailability {
+        case .pending, .unavailable:
             return .neutral
-        }
+        case .available:
+            if report.hasDeveloperIDSignature {
+                return .good
+            }
 
-        if report.hasDeveloperIDSignature {
-            return .good
+            return report.isAdHocSigned ? .neutral : .warning
         }
-
-        return report.isAdHocSigned ? .neutral : .warning
     }
 
     private var developerIDMessage: String {
-        guard report.hasSigningDetails else {
+        switch report.signingDetailsAvailability {
+        case .pending:
             return "Code signing identity details are still being read."
-        }
+        case .unavailable:
+            return "Code signing identity details could not be read. Review the technical log for the command failure."
+        case .available:
+            if let authority = report.developerIDAuthority {
+                if let teamIdentifier = report.teamIdentifier {
+                    return "\(authority). TeamIdentifier \(teamIdentifier)."
+                }
 
-        if let authority = report.developerIDAuthority {
-            if let teamIdentifier = report.teamIdentifier {
-                return "\(authority). TeamIdentifier \(teamIdentifier)."
+                return "\(authority). No TeamIdentifier was reported."
             }
 
-            return "\(authority). No TeamIdentifier was reported."
-        }
+            if report.isAdHocSigned {
+                return "This bundle is ad-hoc signed for local use. It has no Developer ID distribution identity or TeamIdentifier."
+            }
 
-        if report.isAdHocSigned {
-            return "This bundle is ad-hoc signed for local use. It has no Developer ID distribution identity or TeamIdentifier."
+            return "No Developer ID Application certificate was found in the code signing details."
         }
-
-        return "No Developer ID Application certificate was found in the code signing details."
     }
 
     private var gatekeeperSymbol: String {
-        guard report.hasGatekeeperAssessment else {
-            return "clock"
-        }
-
         return switch report.gatekeeperStatus {
+        case .pending: "clock"
         case .accepted: "checkmark.seal.fill"
         case .rejected: "xmark.octagon.fill"
         case .unknown: "questionmark.circle.fill"
+        case .unavailable: "questionmark.circle.fill"
         }
     }
 
     private var gatekeeperStatusText: String {
-        guard report.hasGatekeeperAssessment else {
-            return "Checking"
-        }
-
         return switch report.gatekeeperStatus {
+        case .pending: "Checking"
         case .accepted: "Accepted"
         case .rejected: "Rejected"
         case .unknown: "Unknown"
+        case .unavailable: "Unavailable"
         }
     }
 
     private var gatekeeperTone: DiagnosticTone {
-        guard report.hasGatekeeperAssessment else {
-            return .neutral
+        switch report.gatekeeperStatus {
+        case .accepted: .good
+        case .rejected: .warning
+        case .pending, .unknown, .unavailable: .neutral
         }
-
-        return report.gatekeeperStatus == .accepted ? .good : .warning
     }
 
     private var gatekeeperMessage: String {
-        guard report.hasGatekeeperAssessment else {
-            return "Gatekeeper assessment is still running."
-        }
-
         switch report.gatekeeperStatus {
+        case .pending:
+            return "Gatekeeper assessment is still running."
         case .accepted:
             return "macOS trusts this app for normal launch."
         case .rejected:
             return "macOS does not trust this app for normal distribution or first launch."
         case .unknown:
             return "Gatekeeper did not return a clear accept/reject result."
+        case .unavailable:
+            return "Gatekeeper assessment did not complete. Review the technical log before taking action."
         }
     }
 
     private var quarantineSymbol: String {
-        guard report.hasExtendedAttributes else {
-            return "clock"
+        switch report.quarantineStatus {
+        case .pending: "clock"
+        case .quarantined: "lock.fill"
+        case .clear: "lock.open.fill"
+        case .unavailable: "questionmark.circle.fill"
         }
-
-        return report.isQuarantined ? "lock.fill" : "lock.open.fill"
     }
 
     private var quarantineStatusText: String {
-        guard report.hasExtendedAttributes else {
-            return "Checking"
+        switch report.quarantineStatus {
+        case .pending: "Checking"
+        case .quarantined: "Quarantined"
+        case .clear: "Clear"
+        case .unavailable: "Unavailable"
         }
-
-        return report.isQuarantined ? "Quarantined" : "Clear"
     }
 
     private var quarantineTone: DiagnosticTone {
-        guard report.hasExtendedAttributes else {
-            return .neutral
+        switch report.quarantineStatus {
+        case .pending, .unavailable: .neutral
+        case .quarantined: .warning
+        case .clear: .good
         }
-
-        return report.isQuarantined ? .warning : .good
     }
 
     private var quarantineMessage: String {
-        guard report.hasExtendedAttributes else {
+        switch report.quarantineStatus {
+        case .pending:
             return "Extended attributes are still being read."
+        case .quarantined:
+            return "Downloaded-origin attributes are present and may trigger launch prompts."
+        case .clear:
+            return "No quarantine attributes were found in the inspected output."
+        case .unavailable:
+            return "Extended attributes could not be read. Quarantine state is unknown."
         }
-
-        return report.isQuarantined
-            ? "Downloaded-origin attributes are present and may trigger launch prompts."
-            : "No quarantine attributes were found in the inspected output."
     }
 
     private var debuggingStatusText: String {
-        guard report.hasEntitlements else {
-            return "Checking"
+        switch report.debuggingStatus {
+        case .pending: "Checking"
+        case .debuggable: "Attach allowed"
+        case .notDebuggable: "Not debuggable"
+        case .malformed: "Unknown"
+        case .unavailable: "Unavailable"
         }
-
-        return report.isDebuggable ? "Attach allowed" : "Not debuggable"
     }
 
     private var debuggingTone: DiagnosticTone {
-        guard report.hasEntitlements else {
-            return .neutral
+        switch report.debuggingStatus {
+        case .debuggable: .debug
+        case .pending, .notDebuggable, .malformed, .unavailable: .neutral
         }
-
-        return report.isDebuggable ? .debug : .neutral
     }
 
     private var debuggingMessage: String {
-        guard report.hasEntitlements else {
+        switch report.debuggingStatus {
+        case .pending:
             return "Entitlements are still being read."
+        case .debuggable:
+            return "get-task-allow is true, so debugger and memory tools can attach more easily."
+        case .notDebuggable:
+            return "Create an ad-hoc signed copy with get-task-allow for local debugging."
+        case .malformed:
+            return "The entitlement output was malformed, so attachability could not be determined."
+        case .unavailable:
+            return "Entitlements could not be read. Review the technical log before creating a modified copy."
         }
-
-        return report.isDebuggable
-            ? "get-task-allow is present, so debugger and memory tools can attach more easily."
-            : "Create an ad-hoc signed copy with get-task-allow for local debugging."
     }
 
     private func run(_ action: RepairAction) {
@@ -1191,9 +1215,9 @@ private struct ArchitectureBadge: Identifiable {
 private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBadge] {
     var badges: [DiagnosticBadge] = []
 
-    if report.hasEntitlements {
+    if report.debuggingStatus == .debuggable || report.debuggingStatus == .notDebuggable {
         badges.append(
-            report.isDebuggable
+            report.debuggingStatus == .debuggable
                 ? DiagnosticBadge(
                     id: "debuggable",
                     symbol: "ladybug.fill",
@@ -1212,8 +1236,7 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
         )
     }
 
-    if report.hasGatekeeperAssessment {
-        switch report.gatekeeperStatus {
+    switch report.gatekeeperStatus {
         case .accepted:
             badges.append(
                 DiagnosticBadge(
@@ -1244,10 +1267,11 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
                     color: MacnosisTheme.neutral
                 )
             )
-        }
+        case .pending, .unavailable:
+            break
     }
 
-    if report.hasExtendedAttributes && report.isQuarantined {
+    if report.quarantineStatus == .quarantined {
         badges.append(
             DiagnosticBadge(
                 id: "quarantined",
@@ -1281,7 +1305,7 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
         )
     }
 
-    if report.hasSignatureVerification && report.isSignatureValid == false {
+    if report.signatureVerificationStatus == .invalid {
         badges.append(
             DiagnosticBadge(
                 id: "signature-issue",
@@ -1521,7 +1545,7 @@ private struct CommandLogSection: View {
             .padding(.top, 8)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: result == nil ? "clock" : result?.exitCode == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                Image(systemName: logSymbol)
                     .foregroundStyle(logColor)
                     .font(.system(size: 12, weight: .semibold))
                 Text(title)
@@ -1550,7 +1574,14 @@ private struct CommandLogSection: View {
             return "pending"
         }
 
-        return "exit \(result.exitCode)"
+        switch result.termination {
+        case .exited(let exitCode):
+            return "exit \(exitCode)"
+        case .timedOut:
+            return "timed out"
+        case .failedToLaunch:
+            return "unavailable"
+        }
     }
 
     private var logColor: Color {
@@ -1558,6 +1589,23 @@ private struct CommandLogSection: View {
             return MacnosisTheme.neutral
         }
 
-        return result.exitCode == 0 ? MacnosisTheme.good : MacnosisTheme.warning
+        return result.succeeded ? MacnosisTheme.good : MacnosisTheme.warning
+    }
+
+    private var logSymbol: String {
+        guard let result else {
+            return "clock"
+        }
+
+        switch result.termination {
+        case .exited(0):
+            return "checkmark.circle.fill"
+        case .exited:
+            return "exclamationmark.triangle.fill"
+        case .timedOut:
+            return "clock.badge.exclamationmark"
+        case .failedToLaunch:
+            return "questionmark.circle.fill"
+        }
     }
 }

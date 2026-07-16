@@ -18,6 +18,14 @@ let package = Package(
             name: "macnosis",
             dependencies: ["MacnosisCore"]
         ),
+        .testTarget(
+            name: "MacnosisCoreTests",
+            dependencies: ["MacnosisCore"]
+        ),
+        .testTarget(
+            name: "macnosisTests",
+            dependencies: ["macnosis", "MacnosisCore"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

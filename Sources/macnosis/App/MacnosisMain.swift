@@ -22,7 +22,7 @@ struct MacnosisMain: App {
             .onAppear {
                 bringToFront()
             }
-                .frame(minWidth: 920, minHeight: 620)
+            .frame(minWidth: 920, minHeight: 620)
         }
         .windowStyle(.titleBar)
         .commands {
