@@ -45,6 +45,34 @@ final class CommandExecutorTests: XCTestCase {
         XCTAssertFalse(result.didExit)
     }
 
+    func testCancellationTerminatesTheProcessTree() async throws {
+        let executor = CommandExecutor(terminationGracePeriod: 0.1)
+        let startedAt = Date()
+        let task = Task.detached {
+            executor.run(
+                ["/bin/sh", "-c", "sleep 10 & child=$!; printf '%s\\n' \"$child\"; wait \"$child\""],
+                timeout: 20
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        let result = await task.value
+
+        XCTAssertEqual(result.termination, .cancelled)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+        XCTAssertTrue(result.standardError.contains("Command was cancelled"))
+        let childPID = Int32(result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        XCTAssertNotNil(childPID)
+        if let childPID {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while isProcessRunning(childPID), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertFalse(isProcessRunning(childPID), "Cancelled child process \(childPID) was still running")
+        }
+    }
+
     private func isProcessRunning(_ processID: pid_t) -> Bool {
         var info = proc_bsdinfo()
         let expectedSize = MemoryLayout<proc_bsdinfo>.size

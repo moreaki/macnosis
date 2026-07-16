@@ -1,3 +1,4 @@
+import Foundation
 import MacnosisCore
 import SwiftUI
 
@@ -613,7 +614,7 @@ private struct InspectionReportView: View {
                 CommandLogSection(title: "Entitlements", result: report.entitlements)
                 CommandLogSection(title: "Strict Verification", result: report.signatureVerification)
                 CommandLogSection(title: "Gatekeeper", result: report.gatekeeperAssessment)
-                CommandLogSection(title: "Extended Attributes", result: report.extendedAttributes)
+                CommandLogSection(title: "Bundle Attributes", result: report.extendedAttributes)
             }
             .padding(.top, 10)
         } label: {
@@ -831,11 +832,11 @@ private struct InspectionReportView: View {
         case .pending:
             return "Extended attributes are still being read."
         case .quarantined:
-            return "Downloaded-origin attributes are present and may trigger launch prompts."
+            return "The app bundle has a downloaded-origin attribute that may trigger launch prompts."
         case .clear:
-            return "No quarantine attributes were found in the inspected output."
+            return "No quarantine attribute was found on the app bundle itself."
         case .unavailable:
-            return "Extended attributes could not be read. Quarantine state is unknown."
+            return "The app bundle attributes could not be read. Quarantine state is unknown."
         }
     }
 
@@ -1574,14 +1575,31 @@ private struct CommandLogSection: View {
             return "pending"
         }
 
-        switch result.termination {
+        let status = switch result.termination {
         case .exited(let exitCode):
-            return "exit \(exitCode)"
+            "exit \(exitCode)"
         case .timedOut:
-            return "timed out"
+            "timed out"
+        case .cancelled:
+            "cancelled"
         case .failedToLaunch:
-            return "unavailable"
+            "unavailable"
         }
+
+        guard let duration = result.duration else {
+            return status
+        }
+        return "\(status), \(formatted(duration: duration))"
+    }
+
+    private func formatted(duration: TimeInterval) -> String {
+        if duration < 0.001 {
+            return "<1 ms"
+        }
+        if duration < 1 {
+            return "\(Int((duration * 1_000).rounded())) ms"
+        }
+        return String(format: "%.1f s", duration)
     }
 
     private var logColor: Color {
@@ -1604,6 +1622,8 @@ private struct CommandLogSection: View {
             return "exclamationmark.triangle.fill"
         case .timedOut:
             return "clock.badge.exclamationmark"
+        case .cancelled:
+            return "xmark.circle"
         case .failedToLaunch:
             return "questionmark.circle.fill"
         }

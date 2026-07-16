@@ -25,13 +25,36 @@ final class AppBundleDiscoveryTests: XCTestCase {
         )
 
         let collector = DiscoveryCollector()
-        await AppBundleDiscovery(batchSize: 1).discover(in: [root, firstApp]) { batch in
+        await AppBundleDiscovery(batchSize: 24).discover(in: [root, firstApp]) { batch in
             await collector.append(batch)
         }
 
         let result = await collector.snapshot()
         XCTAssertEqual(result.urls.map(\.lastPathComponent), ["A.app", "B.APP"])
         XCTAssertEqual(result.batchCount, 2)
+    }
+
+    func testOverlappingAliasRootsAreTraversedOnlyOnce() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisDiscoveryIdentityTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let folder = root.appending(path: "Folder", directoryHint: .isDirectory)
+        let initialApp = folder.appending(path: "B.app", directoryHint: .isDirectory)
+        let lateApp = folder.appending(path: "C.app", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: initialApp, withIntermediateDirectories: true)
+
+        let collector = DiscoveryCollector()
+        await AppBundleDiscovery().discover(in: [root, folder]) { batch in
+            await collector.append(batch)
+            if batch.contains(where: { $0.lastPathComponent == initialApp.lastPathComponent }) {
+                try? FileManager.default.createDirectory(at: lateApp, withIntermediateDirectories: true)
+            }
+        }
+
+        let result = await collector.snapshot()
+        XCTAssertEqual(result.urls.map(\.lastPathComponent), ["B.app"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lateApp.path))
     }
 }
 

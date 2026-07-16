@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct AppBundleDiscovery: Sendable {
@@ -15,8 +16,8 @@ struct AppBundleDiscovery: Sendable {
             .map(\.standardizedFileURL)
             .reversed()
             .map { $0 }
-        var seenDirectoryPaths = Set<String>()
-        var seenAppPaths = Set<String>()
+        var seenDirectoryIdentities = Set<FileSystemIdentity>()
+        var seenAppIdentities = Set<FileSystemIdentity>()
         var batch: [URL] = []
 
         while let url = stack.popLast() {
@@ -24,16 +25,14 @@ struct AppBundleDiscovery: Sendable {
                 return
             }
 
-            let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard resourceValues?.isSymbolicLink != true else {
+            guard let metadata = FileSystemEntryMetadata(url: url), metadata.isSymbolicLink == false else {
                 continue
             }
 
-            if url.isAppBundlePath, resourceValues?.isDirectory == true {
-                let identityPath = url.resolvingSymlinksInPath().standardizedFileURL.path
-                if seenAppPaths.insert(identityPath).inserted {
+            if url.isAppBundlePath, metadata.isDirectory {
+                if seenAppIdentities.insert(metadata.identity).inserted {
                     batch.append(url)
-                    if batch.count >= batchSize {
+                    if seenAppIdentities.count == 1 || batch.count >= batchSize {
                         await yieldBatch(batch)
                         batch.removeAll(keepingCapacity: true)
                     }
@@ -41,18 +40,17 @@ struct AppBundleDiscovery: Sendable {
                 continue
             }
 
-            guard resourceValues?.isDirectory == true else {
+            guard metadata.isDirectory else {
                 continue
             }
 
-            let directoryIdentity = url.resolvingSymlinksInPath().standardizedFileURL.path
-            guard seenDirectoryPaths.insert(directoryIdentity).inserted else {
+            guard seenDirectoryIdentities.insert(metadata.identity).inserted else {
                 continue
             }
 
             let children = (try? FileManager.default.contentsOfDirectory(
                 at: url,
-                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )) ?? []
 
@@ -69,6 +67,35 @@ struct AppBundleDiscovery: Sendable {
     private static func pathAscending(_ lhs: URL, _ rhs: URL) -> Bool {
         lhs.lastPathComponent.localizedStandardCompare(rhs.lastPathComponent) == .orderedAscending
     }
+}
+
+private struct FileSystemEntryMetadata {
+    let identity: FileSystemIdentity
+    let isDirectory: Bool
+    let isSymbolicLink: Bool
+
+    init?(url: URL) {
+        var status = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else {
+                return Int32(-1)
+            }
+            return Darwin.lstat(path, &status)
+        }
+        guard result == 0 else {
+            return nil
+        }
+
+        identity = FileSystemIdentity(device: status.st_dev, inode: status.st_ino)
+        let fileType = status.st_mode & mode_t(S_IFMT)
+        isDirectory = fileType == mode_t(S_IFDIR)
+        isSymbolicLink = fileType == mode_t(S_IFLNK)
+    }
+}
+
+private struct FileSystemIdentity: Hashable {
+    let device: dev_t
+    let inode: ino_t
 }
 
 private extension URL {
