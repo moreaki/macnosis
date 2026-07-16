@@ -82,23 +82,31 @@ cleanup() {
 	rm -rf "$tmpdir"
 }
 
-make_entitlements_plist() {
-	local app="$1"
-	local output="$2"
-	local raw_output="$tmpdir/raw-entitlements.txt"
+make_empty_entitlements_plist() {
+	local output="$1"
 
-	if codesign -d --entitlements :- "$app" >"$raw_output" 2>&1; then
-		awk 'found || /^<\?xml/ { found=1; print }' "$raw_output" >"$output"
-	fi
-
-	if [[ ! -s "$output" ]]; then
-		cat >"$output" <<'PLIST'
+	cat >"$output" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict/>
 </plist>
 PLIST
+}
+
+extract_entitlements_plist() {
+	local code="$1"
+	local output="$2"
+
+	rm -f "$output"
+	if ! codesign -d --xml --entitlements "$output" "$code" >/dev/null 2>&1; then
+		rm -f "$output"
+		return 1
+	fi
+
+	if [[ ! -s "$output" ]] || ! plutil -lint "$output" >/dev/null 2>&1; then
+		rm -f "$output"
+		return 1
 	fi
 }
 
@@ -107,6 +115,70 @@ add_debug_entitlement() {
 
 	/usr/libexec/PlistBuddy -c 'Delete :com.apple.security.get-task-allow' "$entitlements" >/dev/null 2>&1 || true
 	/usr/libexec/PlistBuddy -c 'Add :com.apple.security.get-task-allow bool true' "$entitlements"
+}
+
+sign_code() {
+	local code="$1"
+	local add_debug="${2:-0}"
+	local entitlements
+	local has_entitlements=0
+
+	entitlements_counter=$((entitlements_counter + 1))
+	entitlements="$tmpdir/entitlements-$entitlements_counter.plist"
+
+	if extract_entitlements_plist "$code" "$entitlements"; then
+		has_entitlements=1
+	elif [[ "$add_debug" -eq 1 ]]; then
+		make_empty_entitlements_plist "$entitlements"
+		has_entitlements=1
+	fi
+
+	if [[ "$add_debug" -eq 1 ]]; then
+		add_debug_entitlement "$entitlements"
+	fi
+
+	if [[ "$has_entitlements" -eq 1 ]]; then
+		codesign --force --sign - --entitlements "$entitlements" "$code"
+	else
+		codesign --force --sign - "$code"
+	fi
+}
+
+is_signable_bundle() {
+	local candidate="$1"
+
+	[[ -d "$candidate" ]] || return 1
+	case "$candidate" in
+		*.app|*.appex|*.bundle|*.framework|*.mdimporter|*.plugin|*.qlgenerator|*.saver|*.service|*.xpc)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+is_macho_file() {
+	local candidate="$1"
+
+	[[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+	/usr/bin/file -b "$candidate" 2>/dev/null | grep -q 'Mach-O'
+}
+
+sign_nested_code() {
+	local app="$1"
+	local contents="$app/Contents"
+	local candidate
+
+	[[ -d "$contents" ]] || return
+
+	while IFS= read -r -d '' candidate; do
+		[[ -L "$candidate" ]] && continue
+		if is_signable_bundle "$candidate" || is_macho_file "$candidate"; then
+			printf '  Signing nested code: %s\n' "$candidate"
+			sign_code "$candidate"
+		fi
+	done < <(/usr/bin/find "$contents" -depth \( -type f -o -type d \) -print0)
 }
 
 validate_source_app() {
@@ -168,13 +240,11 @@ verify_app_signature() {
 
 repair_damaged_app() {
 	local app="$1"
-	local repair_entitlements="$tmpdir/repair-entitlements.plist"
-
-	make_entitlements_plist "$app" "$repair_entitlements"
 
 	printf 'Repairing in place:\n  %s\n' "$app"
-	printf 'Re-signing ad-hoc...\n'
-	codesign --force --deep --sign - --entitlements "$repair_entitlements" "$app"
+	printf 'Re-signing nested code inside-out with preserved entitlements...\n'
+	sign_nested_code "$app"
+	sign_code "$app"
 
 	printf 'Clearing quarantine and removable extended attributes...\n'
 	clear_launch_blocking_attrs "$app"
@@ -188,26 +258,24 @@ repair_damaged_app() {
 make_debuggable_copy() {
 	local app="$1"
 	local output_app="$2"
-	local entitlements="$tmpdir/debug-entitlements.plist"
 
 	validate_output_app "$output_app"
 	ensure_output_available "$output_app"
 
-	make_entitlements_plist "$app" "$entitlements"
-	add_debug_entitlement "$entitlements"
-
 	printf 'Copying:\n  %s\n  -> %s\n' "$app" "$output_app"
 	/usr/bin/ditto "$app" "$output_app"
 
-	printf 'Re-signing ad-hoc with debugger entitlement...\n'
-	codesign --force --deep --sign - --entitlements "$entitlements" "$output_app"
+	printf 'Re-signing nested code inside-out with preserved entitlements...\n'
+	sign_nested_code "$output_app"
+	printf 'Adding debugger entitlement to the main app only...\n'
+	sign_code "$output_app" 1
 
 	printf 'Verifying signature...\n'
 	verify_app_signature "$output_app"
 
 	printf '\nDone. Debuggable copy created at:\n  %s\n\n' "$output_app"
 	printf 'Confirmed entitlement:\n'
-	codesign -d --entitlements :- "$output_app" 2>&1 | grep -A1 'com.apple.security.get-task-allow' || {
+	codesign -d --xml --entitlements - "$output_app" 2>/dev/null | grep -A1 'com.apple.security.get-task-allow' || {
 		printf 'warning: get-task-allow was not found in the signed output\n' >&2
 		exit 1
 	}
@@ -258,6 +326,7 @@ main() {
 	fi
 
 	tmpdir="$(mktemp -d)"
+	entitlements_counter=0
 	trap cleanup EXIT
 
 	if [[ "$repair_damaged" -eq 1 ]]; then
