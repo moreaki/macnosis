@@ -65,6 +65,13 @@ public struct CodeSigningMetadataReader: Sendable {
             SecCSFlags(rawValue: kSecCSSigningInformation),
             &rawInformation
         )
+        if informationStatus == errSecCSUnsigned {
+            return unsignedResult(
+                bundleURL: bundleURL,
+                command: command,
+                startedAt: startedAt
+            )
+        }
         guard informationStatus == errSecSuccess,
               let information = rawInformation as? [String: Any]
         else {
@@ -75,18 +82,21 @@ public struct CodeSigningMetadataReader: Sendable {
                 startedAt: startedAt
             )
         }
+        // Security.framework may return only the main executable for unsigned code.
+        if information[kSecCodeInfoIdentifier as String] == nil {
+            return unsignedResult(
+                bundleURL: bundleURL,
+                command: command,
+                startedAt: startedAt
+            )
+        }
 
         do {
             let entitlements = information[kSecCodeInfoEntitlementsDict as String] as? [String: Any] ?? [:]
-            let entitlementData = try PropertyListSerialization.data(
-                fromPropertyList: entitlements,
-                format: .xml,
-                options: 0
-            )
             return CommandResult(
                 command: command,
                 exitCode: 0,
-                standardOutput: String(decoding: entitlementData, as: UTF8.self),
+                standardOutput: try serializedEntitlements(entitlements),
                 standardError: signingDetails(from: information),
                 duration: ProcessInfo.processInfo.systemUptime - startedAt
             )
@@ -99,6 +109,46 @@ public struct CodeSigningMetadataReader: Sendable {
                 duration: ProcessInfo.processInfo.systemUptime - startedAt
             )
         }
+    }
+
+    private func unsignedResult(
+        bundleURL: URL,
+        command: [String],
+        startedAt: TimeInterval
+    ) -> CommandResult {
+        do {
+            var details: [String] = []
+            if let executableURL = Bundle(url: bundleURL)?.executableURL {
+                details.append("Executable=\(executableURL.path)")
+            }
+            details.append("Signature=unsigned")
+            details.append("TeamIdentifier=not set")
+
+            return CommandResult(
+                command: command,
+                exitCode: 0,
+                standardOutput: try serializedEntitlements([:]),
+                standardError: details.joined(separator: "\n"),
+                duration: ProcessInfo.processInfo.systemUptime - startedAt
+            )
+        } catch {
+            return CommandResult(
+                command: command,
+                exitCode: 1,
+                standardOutput: "",
+                standardError: "Could not serialize empty entitlements: \(error.localizedDescription)",
+                duration: ProcessInfo.processInfo.systemUptime - startedAt
+            )
+        }
+    }
+
+    private func serializedEntitlements(_ entitlements: [String: Any]) throws -> String {
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: entitlements,
+            format: .xml,
+            options: 0
+        )
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func signingDetails(from information: [String: Any]) -> String {

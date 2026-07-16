@@ -347,6 +347,11 @@ final class MacnosisAppModel: ObservableObject {
         guard let app = inspectedApps.first(where: { $0.id == id }), app.isRepairing == false else {
             return
         }
+        if case .createDebuggableCopy = operation,
+           app.report?.canCreateDebuggableCopy != true
+        {
+            return
+        }
 
         let generation = UUID()
         repairGenerations[id] = generation
@@ -586,7 +591,7 @@ struct InspectedApp: Identifiable, Equatable {
         case .valid:
             return "Checked"
         case .invalid:
-            return "Signature Issue"
+            return report.isUnsigned ? "Unsigned" : "Signature Issue"
         case .pending:
             return isInspecting ? "Checking" : "Checked"
         case .unavailable:

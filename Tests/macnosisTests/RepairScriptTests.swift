@@ -49,6 +49,40 @@ final class RepairScriptTests: XCTestCase {
         XCTAssertEqual(outputHelperEntitlements["com.apple.security.get-task-allow"] as? Bool, false)
     }
 
+    func testDebugCopyRejectsScriptExecutableBeforeCopying() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisScriptRepairTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceApp = root.appending(path: "Source.app", directoryHint: .isDirectory)
+        let outputApp = root.appending(path: "Output.app", directoryHint: .isDirectory)
+        let executableURL = sourceApp.appending(path: "Contents/MacOS/run.sh")
+        try FileManager.default.createDirectory(
+            at: executableURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+        try writePlist([
+            "CFBundleExecutable": executableURL.lastPathComponent,
+            "CFBundleIdentifier": "example.script",
+            "CFBundleName": "Script",
+            "CFBundlePackageType": "APPL",
+        ], to: sourceApp.appending(path: "Contents/Info.plist"))
+
+        let result = try execute([repairScriptURL.path, sourceApp.path, outputApp.path])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(
+            result.standardError.contains("debugger entitlements require a Mach-O app executable"),
+            result.standardError
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outputApp.path))
+    }
+
     private var repairScriptURL: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -89,6 +123,16 @@ final class RepairScriptTests: XCTestCase {
 
     @discardableResult
     private func run(_ command: [String]) throws -> Data {
+        let result = try execute(command)
+        XCTAssertEqual(
+            result.exitCode,
+            0,
+            String(decoding: result.standardOutput, as: UTF8.self) + result.standardError
+        )
+        return result.standardOutput
+    }
+
+    private func execute(_ command: [String]) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command[0])
         process.arguments = Array(command.dropFirst())
@@ -101,11 +145,16 @@ final class RepairScriptTests: XCTestCase {
         process.waitUntilExit()
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
         let error = standardError.fileHandleForReading.readDataToEndOfFile()
-        XCTAssertEqual(
-            process.terminationStatus,
-            0,
-            String(decoding: output + error, as: UTF8.self)
+        return ProcessResult(
+            exitCode: process.terminationStatus,
+            standardOutput: output,
+            standardError: String(decoding: error, as: UTF8.self)
         )
-        return output
     }
+}
+
+private struct ProcessResult {
+    let exitCode: Int32
+    let standardOutput: Data
+    let standardError: String
 }

@@ -84,6 +84,30 @@ final class MacnosisAppModelTests: XCTestCase {
         XCTAssertEqual(model.inspectedApps.first?.report?.teamIdentifier, "NEW")
     }
 
+    func testDebugCopyDoesNotRunForScriptExecutable() async throws {
+        let appURL = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisScriptModelTests-\(UUID().uuidString).app", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: appURL) }
+
+        let repairService = DelayedRepairService()
+        let model = MacnosisAppModel(
+            inspector: ScriptExecutableInspector(),
+            repairService: repairService
+        )
+        let appID = appURL.standardizedFileURL.path
+
+        model.inspect(appURL)
+        try await waitUntil { model.inspectedApps.first?.isInspecting == false }
+        XCTAssertEqual(model.inspectedApps.first?.report?.debuggingStatus, .notApplicable)
+
+        model.createDebuggableCopy(for: appID)
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(repairService.startedCount, 0)
+        XCTAssertFalse(model.inspectedApps.first?.isRepairing ?? true)
+    }
+
     func testDirectoryIntakeSelectsFirstDiscoveredAppWithoutSelectionChurn() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appending(path: "MacnosisSelectionTests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -100,6 +124,35 @@ final class MacnosisAppModelTests: XCTestCase {
             model.inspectedApps.count == 2 && model.activeInspectionCount == 0
         }
         XCTAssertEqual(model.selectedAppID, firstAppURL.standardizedFileURL.path)
+    }
+
+    func testSidebarReportsUnsignedCodeExplicitly() throws {
+        var report = try ScriptExecutableInspector().initialReport(
+            bundleURL: URL(fileURLWithPath: "/Applications/Unsigned.app")
+        )
+        report.signingDetails = CommandResult(
+            command: ["Security.framework"],
+            exitCode: 0,
+            standardOutput: "",
+            standardError: "Signature=unsigned\nTeamIdentifier=not set"
+        )
+        report.signatureVerification = CommandResult(
+            command: ["codesign"],
+            exitCode: 1,
+            standardOutput: "",
+            standardError: "code object is not signed at all"
+        )
+        let app = InspectedApp(
+            id: report.bundleURL.path,
+            url: report.bundleURL,
+            report: report,
+            errorMessage: nil,
+            isInspecting: false,
+            isRepairing: false,
+            actionMessage: nil
+        )
+
+        XCTAssertEqual(app.statusText, "Unsigned")
     }
 
     func testWholeAppInspectionPipelinesAreBounded() async throws {
@@ -215,6 +268,41 @@ private final class ImmediateInspector: AppBundleInspecting, @unchecked Sendable
 
     func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult {
         fatalError("ImmediateInspector has no commands")
+    }
+}
+
+private final class ScriptExecutableInspector: AppBundleInspecting, @unchecked Sendable {
+    func initialReport(bundleURL: URL) throws -> AppInspectionReport {
+        let entitlementData = try PropertyListSerialization.data(
+            fromPropertyList: [String: Any](),
+            format: .xml,
+            options: 0
+        )
+        return AppInspectionReport(
+            bundleURL: bundleURL,
+            bundleName: "Script Fixture",
+            bundleIdentifier: "example.script",
+            version: "1",
+            buildVersion: "1",
+            bundleInfoString: nil,
+            executableName: "run.sh",
+            executableURL: bundleURL.appending(path: "Contents/MacOS/run.sh"),
+            executableFileDescription: "Bourne-Again shell script text executable",
+            entitlements: CommandResult(
+                command: ["Security.framework"],
+                exitCode: 0,
+                standardOutput: String(decoding: entitlementData, as: UTF8.self),
+                standardError: ""
+            )
+        )
+    }
+
+    func inspectionCommands(for report: AppInspectionReport) -> [AppInspectionCommand] {
+        []
+    }
+
+    func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult {
+        fatalError("ScriptExecutableInspector has no commands")
     }
 }
 

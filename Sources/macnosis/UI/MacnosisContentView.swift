@@ -594,13 +594,13 @@ private struct InspectionReportView: View {
             )
 
             DiagnosticPanel(
-                symbol: "ladybug.fill",
+                symbol: debuggingSymbol,
                 isSymbolCrossed: report.debuggingStatus == .notDebuggable,
                 title: "Debugging",
                 status: debuggingStatusText,
                 tone: debuggingTone,
                 message: debuggingMessage,
-                actionTitle: report.debuggingStatus == .notDebuggable ? "Create Debug Copy" : nil,
+                actionTitle: report.canCreateDebuggableCopy ? "Create Debug Copy" : nil,
                 isWorking: app.isRepairing,
                 action: { pendingAction = .createDebuggableCopy }
             )
@@ -666,7 +666,7 @@ private struct InspectionReportView: View {
         switch report.signatureVerificationStatus {
         case .pending: "Checking"
         case .valid: "Valid on disk"
-        case .invalid: "Signature issue"
+        case .invalid: report.isUnsigned ? "Unsigned" : "Signature issue"
         case .unavailable: "Unavailable"
         }
     }
@@ -686,6 +686,9 @@ private struct InspectionReportView: View {
         case .valid:
             return report.isAdHocSigned ? "The local ad-hoc signature is structurally valid." : "The bundle satisfies strict code signature verification."
         case .invalid:
+            if report.isUnsigned {
+                return "No code signature is present. Re-signing can create a local ad-hoc signature."
+            }
             return "Strict verification confirmed a signature problem. Re-signing can repair stale or missing bundle seals."
         case .unavailable:
             return "Signature verification did not complete. Review the technical log before taking action."
@@ -718,6 +721,10 @@ private struct InspectionReportView: View {
                 return "Present"
             }
 
+            if report.isUnsigned {
+                return "Unsigned"
+            }
+
             return report.isAdHocSigned ? "Ad-hoc only" : "Not present"
         }
     }
@@ -742,6 +749,10 @@ private struct InspectionReportView: View {
         case .unavailable:
             return "Code signing identity details could not be read. Review the technical log for the command failure."
         case .available:
+            if report.isUnsigned {
+                return "This bundle is unsigned, so it has no Developer ID distribution identity or TeamIdentifier."
+            }
+
             if let authority = report.developerIDAuthority {
                 if let teamIdentifier = report.teamIdentifier {
                     return "\(authority). TeamIdentifier \(teamIdentifier)."
@@ -845,15 +856,20 @@ private struct InspectionReportView: View {
         case .pending: "Checking"
         case .debuggable: "Attach allowed"
         case .notDebuggable: "Not debuggable"
+        case .notApplicable: "Not applicable"
         case .malformed: "Unknown"
         case .unavailable: "Unavailable"
         }
     }
 
+    private var debuggingSymbol: String {
+        report.debuggingStatus == .notApplicable ? "minus.circle.fill" : "ladybug.fill"
+    }
+
     private var debuggingTone: DiagnosticTone {
         switch report.debuggingStatus {
         case .debuggable: .debug
-        case .pending, .notDebuggable, .malformed, .unavailable: .neutral
+        case .pending, .notDebuggable, .notApplicable, .malformed, .unavailable: .neutral
         }
     }
 
@@ -865,6 +881,8 @@ private struct InspectionReportView: View {
             return "get-task-allow is true, so debugger and memory tools can attach more easily."
         case .notDebuggable:
             return "Create an ad-hoc signed copy with get-task-allow for local debugging."
+        case .notApplicable:
+            return "The declared executable is not Mach-O code, so debugger-attachment entitlements do not apply."
         case .malformed:
             return "The entitlement output was malformed, so attachability could not be determined."
         case .unavailable:
@@ -1309,10 +1327,12 @@ private func diagnosticBadges(for report: AppInspectionReport) -> [DiagnosticBad
     if report.signatureVerificationStatus == .invalid {
         badges.append(
             DiagnosticBadge(
-                id: "signature-issue",
-                symbol: "exclamationmark.triangle.fill",
-                title: "Signature Issue",
-                help: "Strict code signature verification failed.",
+                id: report.isUnsigned ? "unsigned" : "signature-issue",
+                symbol: report.isUnsigned ? "signature" : "exclamationmark.triangle.fill",
+                title: report.isUnsigned ? "Unsigned" : "Signature Issue",
+                help: report.isUnsigned
+                    ? "No code signature is present."
+                    : "Strict code signature verification failed.",
                 color: MacnosisTheme.warning
             )
         )
