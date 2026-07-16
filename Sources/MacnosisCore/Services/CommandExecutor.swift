@@ -16,12 +16,14 @@ public struct CommandExecutor: Sendable {
     }
 
     public func run(_ command: [String], timeout: TimeInterval) -> CommandResult {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         guard let executable = command.first else {
             return CommandResult(
                 command: command,
                 termination: .failedToLaunch,
                 standardOutput: "",
-                standardError: "No executable was provided."
+                standardError: "No executable was provided.",
+                duration: elapsed(since: startedAt)
             )
         }
 
@@ -65,23 +67,21 @@ public struct CommandExecutor: Sendable {
                     command: command,
                     termination: .failedToLaunch,
                     standardOutput: "",
-                    standardError: String(describing: error)
+                    standardError: String(describing: error),
+                    duration: elapsed(since: startedAt)
                 )
             }
 
             let normalizedTimeout = max(0, timeout)
-            let timedOut = terminationSemaphore.wait(timeout: .now() + normalizedTimeout) == .timedOut
-            if timedOut {
-                let processTree = processTreePIDs(rootPID: process.processIdentifier)
-                signal(processTree: processTree, with: SIGTERM)
-
-                let rootTimedOut = terminationSemaphore.wait(timeout: .now() + terminationGracePeriod) == .timedOut
-                if rootTimedOut, process.isRunning {
-                    signal(processTree: processTree, with: SIGKILL)
-                    process.waitUntilExit()
-                } else {
-                    signal(processTree: Array(processTree.dropFirst()), with: SIGKILL)
-                }
+            let waitOutcome = waitForTermination(
+                terminationSemaphore,
+                timeout: normalizedTimeout
+            )
+            if waitOutcome != .exited {
+                terminate(
+                    process: process,
+                    terminationSemaphore: terminationSemaphore
+                )
             }
 
             try standardOutputHandle.close()
@@ -92,14 +92,20 @@ public struct CommandExecutor: Sendable {
             let standardOutput = capturedStandardOutput.text
             var standardError = capturedStandardError.text
             let termination: CommandTermination
-            if timedOut {
+            switch waitOutcome {
+            case .timedOut:
                 let seconds = max(0, Int(normalizedTimeout.rounded(.up)))
                 let timeoutMessage = "Command timed out after \(seconds) seconds."
                 standardError = [standardError, timeoutMessage]
                     .filter { $0.isEmpty == false }
                     .joined(separator: "\n")
                 termination = .timedOut(seconds: seconds)
-            } else {
+            case .cancelled:
+                standardError = [standardError, "Command was cancelled."]
+                    .filter { $0.isEmpty == false }
+                    .joined(separator: "\n")
+                termination = .cancelled
+            case .exited:
                 termination = .exited(process.terminationStatus)
             }
 
@@ -109,7 +115,8 @@ public struct CommandExecutor: Sendable {
                 standardOutput: standardOutput,
                 standardError: standardError,
                 standardOutputWasTruncated: capturedStandardOutput.wasTruncated,
-                standardErrorWasTruncated: capturedStandardError.wasTruncated
+                standardErrorWasTruncated: capturedStandardError.wasTruncated,
+                duration: elapsed(since: startedAt)
             )
         } catch {
             try? FileManager.default.removeItem(at: captureDirectory)
@@ -117,8 +124,60 @@ public struct CommandExecutor: Sendable {
                 command: command,
                 termination: .failedToLaunch,
                 standardOutput: "",
-                standardError: String(describing: error)
+                standardError: String(describing: error),
+                duration: elapsed(since: startedAt)
             )
+        }
+    }
+
+    private func elapsed(since startedAt: TimeInterval) -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime - startedAt
+    }
+
+    private func waitForTermination(
+        _ terminationSemaphore: DispatchSemaphore,
+        timeout: TimeInterval
+    ) -> ProcessWaitOutcome {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+
+        while true {
+            if currentTaskIsCancelled {
+                return .cancelled
+            }
+
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                return terminationSemaphore.wait(timeout: .now()) == .success
+                    ? .exited
+                    : .timedOut
+            }
+
+            let waitSlice = min(remaining, 0.05)
+            if terminationSemaphore.wait(timeout: .now() + waitSlice) == .success {
+                return .exited
+            }
+        }
+    }
+
+    private var currentTaskIsCancelled: Bool {
+        withUnsafeCurrentTask { task in
+            task?.isCancelled ?? false
+        }
+    }
+
+    private func terminate(
+        process: Process,
+        terminationSemaphore: DispatchSemaphore
+    ) {
+        let processTree = processTreePIDs(rootPID: process.processIdentifier)
+        signal(processTree: processTree, with: SIGTERM)
+
+        let rootTimedOut = terminationSemaphore.wait(timeout: .now() + terminationGracePeriod) == .timedOut
+        if rootTimedOut, process.isRunning {
+            signal(processTree: processTree, with: SIGKILL)
+            process.waitUntilExit()
+        } else {
+            signal(processTree: Array(processTree.dropFirst()), with: SIGKILL)
         }
     }
 
@@ -187,4 +246,10 @@ public struct CommandExecutor: Sendable {
 private struct CapturedOutput {
     let text: String
     let wasTruncated: Bool
+}
+
+private enum ProcessWaitOutcome {
+    case exited
+    case timedOut
+    case cancelled
 }

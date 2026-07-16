@@ -59,6 +59,78 @@ final class MacnosisAppModelTests: XCTestCase {
         XCTAssertFalse(model.inspectedApps.first?.isRepairing ?? true)
     }
 
+    func testCompletedRepairRestartsAnActiveInspection() async throws {
+        let appURL = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisRepairRefreshTests-\(UUID().uuidString).app", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: appURL) }
+
+        let inspector = SequencedInspector()
+        let repairService = DelayedRepairService()
+        let model = MacnosisAppModel(inspector: inspector, repairService: repairService)
+        let appID = appURL.standardizedFileURL.path
+
+        model.inspect(appURL)
+        try await waitUntil { inspector.startedCount == 1 }
+        model.clearQuarantine(for: appID)
+
+        try await waitUntil {
+            inspector.startedCount == 2
+                && model.inspectedApps.first?.report?.teamIdentifier == "NEW"
+                && model.inspectedApps.first?.isInspecting == false
+        }
+
+        XCTAssertEqual(inspector.startedCount, 2)
+        XCTAssertEqual(model.inspectedApps.first?.report?.teamIdentifier, "NEW")
+    }
+
+    func testDirectoryIntakeSelectsFirstDiscoveredAppWithoutSelectionChurn() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisSelectionTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let firstAppURL = rootURL.appending(path: "A.app", directoryHint: .isDirectory)
+        let secondAppURL = rootURL.appending(path: "B.app", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: firstAppURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondAppURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let model = MacnosisAppModel(inspector: ImmediateInspector())
+        model.inspect(rootURL)
+
+        try await waitUntil {
+            model.inspectedApps.count == 2 && model.activeInspectionCount == 0
+        }
+        XCTAssertEqual(model.selectedAppID, firstAppURL.standardizedFileURL.path)
+    }
+
+    func testWholeAppInspectionPipelinesAreBounded() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: "MacnosisPipelineTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let appCount = MacnosisAppModel.maxConcurrentAppInspections + 8
+        let appURLs = try (0..<appCount).map { index in
+            let appURL = rootURL.appending(
+                path: String(format: "Fixture-%03d.app", index),
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
+            return appURL
+        }
+
+        let inspector = ConcurrencyTrackingInspector()
+        let model = MacnosisAppModel(inspector: inspector)
+        model.inspect(appURLs)
+
+        try await waitUntil(timeout: .seconds(5)) {
+            model.inspectedApps.count == appCount && model.activeInspectionCount == 0
+        }
+        XCTAssertLessThanOrEqual(
+            inspector.maximumConcurrentInitialReports,
+            MacnosisAppModel.maxConcurrentAppInspections
+        )
+    }
+
     private func waitUntil(
         timeout: Duration = .seconds(2),
         condition: () -> Bool
@@ -72,6 +144,45 @@ final class MacnosisAppModelTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(10))
         }
+    }
+}
+
+private final class ConcurrencyTrackingInspector: AppBundleInspecting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeInitialReports = 0
+    private var maximumInitialReports = 0
+
+    var maximumConcurrentInitialReports: Int {
+        lock.withLock { maximumInitialReports }
+    }
+
+    func initialReport(bundleURL: URL) throws -> AppInspectionReport {
+        lock.withLock {
+            activeInitialReports += 1
+            maximumInitialReports = max(maximumInitialReports, activeInitialReports)
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+        lock.withLock { activeInitialReports -= 1 }
+
+        return AppInspectionReport(
+            bundleURL: bundleURL,
+            bundleName: "Fixture",
+            bundleIdentifier: "example.fixture",
+            version: "1",
+            buildVersion: "1",
+            bundleInfoString: nil,
+            executableName: nil,
+            executableURL: nil,
+            executableFileDescription: nil
+        )
+    }
+
+    func inspectionCommands(for report: AppInspectionReport) -> [AppInspectionCommand] {
+        []
+    }
+
+    func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult {
+        fatalError("ConcurrencyTrackingInspector has no commands")
     }
 }
 
@@ -149,7 +260,7 @@ private final class SequencedInspector: AppBundleInspecting, @unchecked Sendable
     }
 
     func inspectionCommands(for report: AppInspectionReport) -> [AppInspectionCommand] {
-        [.signingDetails]
+        [.signingMetadata]
     }
 
     func run(_ command: AppInspectionCommand, for report: AppInspectionReport) -> AppInspectionCommandResult {

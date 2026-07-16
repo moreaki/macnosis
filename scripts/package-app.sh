@@ -17,8 +17,9 @@ cd "$PROJECT_ROOT"
 swift build
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Resources"
 cp "$PROJECT_ROOT/.build/debug/macnosis" "$APP_DIR/Contents/MacOS/Macnosis"
+cp "$PROJECT_ROOT/.build/debug/MacnosisSecurityHelper" "$APP_DIR/Contents/Helpers/MacnosisSecurityHelper"
 cp "$PROJECT_ROOT/Packaging/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$PROJECT_ROOT/Packaging/MacnosisIcon.icns" "$APP_DIR/Contents/Resources/MacnosisIcon.icns"
 cp "$PROJECT_ROOT/scripts/make-debuggable-app.sh" "$APP_DIR/Contents/Resources/make-debuggable-app.sh"
@@ -26,7 +27,8 @@ for bundle in "$PROJECT_ROOT"/.build/debug/macnosis_*.bundle; do
     [ -d "$bundle" ] || continue
     cp -R "$bundle" "$APP_DIR/Contents/Resources/"
 done
-chmod +x "$APP_DIR/Contents/MacOS/Macnosis"
+chmod +x "$APP_DIR/Contents/MacOS/Macnosis" "$APP_DIR/Contents/Helpers/MacnosisSecurityHelper"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/MacnosisSecurityHelper"
 
 if codesign -d --xml --entitlements "$ENTITLEMENTS_FILE" "$APP_DIR/Contents/MacOS/Macnosis" >/dev/null 2>&1 \
     && [ -s "$ENTITLEMENTS_FILE" ]; then

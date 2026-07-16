@@ -2,9 +2,23 @@ import Foundation
 
 public struct AppBundleInspector: Sendable {
     private let commandExecutor: CommandExecutor
+    private let executableMetadataReader: ExecutableMetadataReader
+    private let codeSigningMetadataReader: CodeSigningMetadataReader
+    private let signatureVerificationReader: SignatureVerificationReader
+    private let bundleAttributeReader: BundleAttributeReader
 
-    public init(commandExecutor: CommandExecutor = CommandExecutor()) {
+    public init(
+        commandExecutor: CommandExecutor = CommandExecutor(),
+        executableMetadataReader: ExecutableMetadataReader = ExecutableMetadataReader(),
+        codeSigningMetadataReader: CodeSigningMetadataReader = CodeSigningMetadataReader(),
+        signatureVerificationReader: SignatureVerificationReader = SignatureVerificationReader(),
+        bundleAttributeReader: BundleAttributeReader = BundleAttributeReader()
+    ) {
         self.commandExecutor = commandExecutor
+        self.executableMetadataReader = executableMetadataReader
+        self.codeSigningMetadataReader = codeSigningMetadataReader
+        self.signatureVerificationReader = signatureVerificationReader
+        self.bundleAttributeReader = bundleAttributeReader
     }
 
     public func inspect(bundleURL: URL) throws -> AppInspectionReport {
@@ -18,7 +32,7 @@ public struct AppBundleInspector: Sendable {
 
     public func initialReport(bundleURL: URL) throws -> AppInspectionReport {
         let normalizedURL = bundleURL.standardizedFileURL
-        guard normalizedURL.pathExtension == "app" else {
+        guard normalizedURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame else {
             throw AppInspectionError.notAppBundle(normalizedURL)
         }
 
@@ -53,7 +67,7 @@ public struct AppBundleInspector: Sendable {
             switch command {
             case .executableFileDescription:
                 return report.executableURL != nil
-            case .signingDetails, .entitlements, .signatureVerification, .gatekeeperAssessment, .extendedAttributes:
+            case .signingMetadata, .signatureVerification, .gatekeeperAssessment, .extendedAttributes:
                 return true
             }
         }
@@ -65,7 +79,10 @@ public struct AppBundleInspector: Sendable {
         switch command {
         case .executableFileDescription:
             if let executableURL = report.executableURL {
-                commandResult = commandExecutor.run(["/usr/bin/file", executableURL.path], timeout: 5)
+                commandResult = executableMetadataReader.read(
+                    bundleURL: report.bundleURL,
+                    executableURL: executableURL
+                ) ?? commandExecutor.run(["/usr/bin/file", executableURL.path], timeout: 5)
             } else {
                 commandResult = CommandResult(
                     command: ["/usr/bin/file"],
@@ -74,16 +91,17 @@ public struct AppBundleInspector: Sendable {
                     standardError: "No executable was found in the app bundle."
                 )
             }
-        case .signingDetails:
-            commandResult = commandExecutor.run(["/usr/bin/codesign", "-dv", "--verbose=4", report.bundleURL.path], timeout: 10)
-        case .entitlements:
-            commandResult = commandExecutor.run(["/usr/bin/codesign", "-d", "--xml", "--entitlements", "-", report.bundleURL.path], timeout: 10)
+        case .signingMetadata:
+            commandResult = codeSigningMetadataReader.read(bundleURL: report.bundleURL)
         case .signatureVerification:
-            commandResult = commandExecutor.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", report.bundleURL.path], timeout: 45)
+            commandResult = signatureVerificationReader.read(
+                bundleURL: report.bundleURL,
+                commandExecutor: commandExecutor
+            )
         case .gatekeeperAssessment:
             commandResult = commandExecutor.run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", report.bundleURL.path], timeout: 60)
         case .extendedAttributes:
-            commandResult = commandExecutor.run(["/usr/bin/xattr", "-lr", report.bundleURL.path], timeout: 20)
+            commandResult = bundleAttributeReader.read(bundleURL: report.bundleURL)
         }
 
         return AppInspectionCommandResult(command: command, result: commandResult)

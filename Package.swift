@@ -10,10 +10,15 @@ let package = Package(
     ],
     products: [
         .executable(name: "macnosis", targets: ["macnosis"]),
+        .executable(name: "MacnosisSecurityHelper", targets: ["MacnosisSecurityHelper"]),
         .library(name: "MacnosisCore", targets: ["MacnosisCore"]),
     ],
     targets: [
         .target(name: "MacnosisCore"),
+        .executableTarget(
+            name: "MacnosisSecurityHelper",
+            dependencies: ["MacnosisCore"]
+        ),
         .executableTarget(
             name: "macnosis",
             dependencies: ["MacnosisCore"]

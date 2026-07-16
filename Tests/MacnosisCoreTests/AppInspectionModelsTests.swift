@@ -88,6 +88,26 @@ final class AppInspectionModelsTests: XCTestCase {
         XCTAssertFalse(report.hasExtendedAttributes)
     }
 
+    func testMissingTeamIdentifierDoesNotOverrideSignedAuthority() {
+        var appleSigned = report()
+        appleSigned.signingDetails = CommandResult(
+            command: ["codesign"],
+            exitCode: 0,
+            standardOutput: "",
+            standardError: "Signature=signed\nAuthority=Software Signing\nTeamIdentifier=not set"
+        )
+        XCTAssertFalse(appleSigned.isAdHocSigned)
+
+        var adHoc = report()
+        adHoc.signingDetails = CommandResult(
+            command: ["codesign"],
+            exitCode: 0,
+            standardOutput: "",
+            standardError: "Signature=adhoc\nTeamIdentifier=not set"
+        )
+        XCTAssertTrue(adHoc.isAdHocSigned)
+    }
+
     private func report(entitlementsOutput: String? = nil) -> AppInspectionReport {
         AppInspectionReport(
             bundleURL: URL(fileURLWithPath: "/Applications/Fixture.app"),

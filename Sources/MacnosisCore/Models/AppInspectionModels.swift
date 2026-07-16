@@ -122,8 +122,19 @@ public struct AppInspectionReport: Equatable, Sendable {
     }
 
     public var isAdHocSigned: Bool {
-        signingDetails?.combinedOutput.contains("Signature=adhoc") == true
-            || signingDetails?.combinedOutput.contains("TeamIdentifier=not set") == true
+        guard let signingDetails else {
+            return false
+        }
+
+        let output = signingDetails.combinedOutput
+        if output.contains("Signature=adhoc") {
+            return true
+        }
+        if output.contains("Signature=signed") {
+            return false
+        }
+
+        return output.contains("TeamIdentifier=not set") && signingAuthorityChain.isEmpty
     }
 
     public var hasDeveloperIDSignature: Bool {
@@ -347,10 +358,12 @@ public struct AppInspectionReport: Equatable, Sendable {
             executableFileDescription = result.result.succeeded
                 ? result.result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
                 : nil
-        case .signingDetails:
-            signingDetails = result.result
-        case .entitlements:
-            entitlements = result.result
+        case .signingMetadata:
+            signingDetails = result.result.selectingOutput(standardOutput: false, standardError: true)
+            entitlements = result.result.selectingOutput(
+                standardOutput: true,
+                standardError: result.result.succeeded == false
+            )
         case .signatureVerification:
             signatureVerification = result.result
         case .gatekeeperAssessment:
@@ -363,8 +376,7 @@ public struct AppInspectionReport: Equatable, Sendable {
 
 public enum AppInspectionCommand: CaseIterable, Equatable, Sendable {
     case executableFileDescription
-    case signingDetails
-    case entitlements
+    case signingMetadata
     case signatureVerification
     case gatekeeperAssessment
     case extendedAttributes
@@ -429,6 +441,7 @@ public enum AppArchitecture: Equatable, Sendable {
 public enum CommandTermination: Equatable, Sendable {
     case exited(Int32)
     case timedOut(seconds: Int)
+    case cancelled
     case failedToLaunch
 }
 
@@ -439,6 +452,7 @@ public struct CommandResult: Equatable, Sendable {
     public let standardError: String
     public let standardOutputWasTruncated: Bool
     public let standardErrorWasTruncated: Bool
+    public let duration: TimeInterval?
 
     public init(
         command: [String],
@@ -446,7 +460,8 @@ public struct CommandResult: Equatable, Sendable {
         standardOutput: String,
         standardError: String,
         standardOutputWasTruncated: Bool = false,
-        standardErrorWasTruncated: Bool = false
+        standardErrorWasTruncated: Bool = false,
+        duration: TimeInterval? = nil
     ) {
         self.init(
             command: command,
@@ -454,7 +469,8 @@ public struct CommandResult: Equatable, Sendable {
             standardOutput: standardOutput,
             standardError: standardError,
             standardOutputWasTruncated: standardOutputWasTruncated,
-            standardErrorWasTruncated: standardErrorWasTruncated
+            standardErrorWasTruncated: standardErrorWasTruncated,
+            duration: duration
         )
     }
 
@@ -464,7 +480,8 @@ public struct CommandResult: Equatable, Sendable {
         standardOutput: String,
         standardError: String,
         standardOutputWasTruncated: Bool = false,
-        standardErrorWasTruncated: Bool = false
+        standardErrorWasTruncated: Bool = false,
+        duration: TimeInterval? = nil
     ) {
         self.command = command
         self.termination = termination
@@ -472,6 +489,7 @@ public struct CommandResult: Equatable, Sendable {
         self.standardError = standardError
         self.standardOutputWasTruncated = standardOutputWasTruncated
         self.standardErrorWasTruncated = standardErrorWasTruncated
+        self.duration = duration
     }
 
     public var exitCode: Int32 {
@@ -480,6 +498,8 @@ public struct CommandResult: Equatable, Sendable {
             return exitCode
         case .timedOut:
             return 124
+        case .cancelled:
+            return 130
         case .failedToLaunch:
             return 127
         }
@@ -501,6 +521,21 @@ public struct CommandResult: Equatable, Sendable {
         [standardOutput, standardError]
             .filter { $0.isEmpty == false }
             .joined(separator: "\n")
+    }
+
+    fileprivate func selectingOutput(
+        standardOutput includeStandardOutput: Bool,
+        standardError includeStandardError: Bool
+    ) -> CommandResult {
+        CommandResult(
+            command: command,
+            termination: termination,
+            standardOutput: includeStandardOutput ? standardOutput : "",
+            standardError: includeStandardError ? standardError : "",
+            standardOutputWasTruncated: includeStandardOutput && standardOutputWasTruncated,
+            standardErrorWasTruncated: includeStandardError && standardErrorWasTruncated,
+            duration: duration
+        )
     }
 }
 
