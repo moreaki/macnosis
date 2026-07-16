@@ -31,6 +31,32 @@ final class AppInspectionModelsTests: XCTestCase {
         XCTAssertEqual(unavailable.debuggingStatus, .unavailable)
     }
 
+    func testDebuggerEntitlementsDoNotApplyToNonMachOExecutables() throws {
+        let emptyEntitlements = try plist([:])
+        let script = report(
+            entitlementsOutput: emptyEntitlements,
+            executableFileDescription: "Bourne-Again shell script text executable"
+        )
+        let textExecutable = report(
+            entitlementsOutput: emptyEntitlements,
+            executableFileDescription: "ASCII text executable"
+        )
+
+        XCTAssertEqual(script.debuggingStatus, .notApplicable)
+        XCTAssertFalse(script.canCreateDebuggableCopy)
+        XCTAssertEqual(textExecutable.debuggingStatus, .notApplicable)
+        XCTAssertFalse(textExecutable.canCreateDebuggableCopy)
+    }
+
+    func testDebuggabilityWaitsForExecutableType() throws {
+        let unresolved = report(
+            entitlementsOutput: try plist([:]),
+            executableFileDescription: nil
+        )
+
+        XCTAssertEqual(unresolved.debuggingStatus, .pending)
+    }
+
     func testUnavailableCommandsDoNotBecomeNegativeDiagnoses() {
         var report = report()
         report.signatureVerification = CommandResult(
@@ -106,9 +132,22 @@ final class AppInspectionModelsTests: XCTestCase {
             standardError: "Signature=adhoc\nTeamIdentifier=not set"
         )
         XCTAssertTrue(adHoc.isAdHocSigned)
+
+        var unsigned = report()
+        unsigned.signingDetails = CommandResult(
+            command: ["codesign"],
+            exitCode: 0,
+            standardOutput: "",
+            standardError: "Signature=unsigned\nTeamIdentifier=not set"
+        )
+        XCTAssertTrue(unsigned.isUnsigned)
+        XCTAssertFalse(unsigned.isAdHocSigned)
     }
 
-    private func report(entitlementsOutput: String? = nil) -> AppInspectionReport {
+    private func report(
+        entitlementsOutput: String? = nil,
+        executableFileDescription: String? = "Mach-O 64-bit executable arm64"
+    ) -> AppInspectionReport {
         AppInspectionReport(
             bundleURL: URL(fileURLWithPath: "/Applications/Fixture.app"),
             bundleName: "Fixture",
@@ -118,7 +157,7 @@ final class AppInspectionModelsTests: XCTestCase {
             bundleInfoString: nil,
             executableName: "Fixture",
             executableURL: URL(fileURLWithPath: "/Applications/Fixture.app/Contents/MacOS/Fixture"),
-            executableFileDescription: nil,
+            executableFileDescription: executableFileDescription,
             entitlements: entitlementsOutput.map {
                 CommandResult(command: ["codesign"], exitCode: 0, standardOutput: $0, standardError: "")
             }

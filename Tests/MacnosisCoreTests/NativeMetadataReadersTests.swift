@@ -30,6 +30,7 @@ final class NativeMetadataReadersTests: XCTestCase {
             "Foundation.Bundle.executableArchitectures"
         )
         XCTAssertTrue(architectureResult.result.standardOutput.contains("Mach-O"))
+        report.apply(architectureResult)
 
         let metadataResult = inspector.run(.signingMetadata, for: report)
         XCTAssertTrue(metadataResult.result.succeeded, metadataResult.result.combinedOutput)
@@ -41,6 +42,58 @@ final class NativeMetadataReadersTests: XCTestCase {
         XCTAssertEqual(report.debuggingStatus, .notDebuggable)
         XCTAssertNotNil(report.signingDetails?.duration)
         XCTAssertNotNil(report.entitlements?.duration)
+    }
+
+    func testUnsignedMachOHasAvailableEmptyEntitlements() throws {
+        let fixture = try AppFixture()
+        defer { fixture.remove() }
+
+        let removalResult = CommandExecutor().run(
+            ["/usr/bin/codesign", "--remove-signature", fixture.executableURL.path],
+            timeout: 10
+        )
+        XCTAssertTrue(removalResult.succeeded, removalResult.combinedOutput)
+
+        let inspector = AppBundleInspector()
+        var report = try inspector.initialReport(bundleURL: fixture.appURL)
+        report.apply(inspector.run(.executableFileDescription, for: report))
+        let metadataResult = inspector.run(.signingMetadata, for: report)
+        report.apply(metadataResult)
+        report.apply(inspector.run(.signatureVerification, for: report))
+
+        XCTAssertTrue(metadataResult.result.succeeded, metadataResult.result.combinedOutput)
+        XCTAssertTrue(report.isUnsigned)
+        XCTAssertFalse(report.isAdHocSigned)
+        XCTAssertEqual(report.signatureVerificationStatus, .invalid)
+        XCTAssertEqual(report.debuggingStatus, .notDebuggable)
+        XCTAssertTrue(report.canCreateDebuggableCopy)
+        XCTAssertTrue(try entitlementDictionary(from: report.entitlements).isEmpty)
+    }
+
+    func testUnsignedScriptHasNotApplicableDebuggerEntitlements() throws {
+        let fixture = try AppFixture(executableContents: "#!/bin/sh\nexit 0\n")
+        defer { fixture.remove() }
+
+        let inspector = AppBundleInspector()
+        var report = try inspector.initialReport(bundleURL: fixture.appURL)
+        report.apply(inspector.run(.executableFileDescription, for: report))
+        report.apply(inspector.run(.signingMetadata, for: report))
+
+        XCTAssertEqual(report.architectures, [.script])
+        XCTAssertTrue(report.isUnsigned)
+        XCTAssertEqual(report.debuggingStatus, .notApplicable)
+        XCTAssertFalse(report.canCreateDebuggableCopy)
+        XCTAssertTrue(try entitlementDictionary(from: report.entitlements).isEmpty)
+    }
+
+    func testMissingCodeRemainsAMetadataFailure() {
+        let missingURL = FileManager.default.temporaryDirectory
+            .appending(path: "Missing-\(UUID().uuidString).app", directoryHint: .isDirectory)
+
+        let result = CodeSigningMetadataReader().read(bundleURL: missingURL)
+
+        XCTAssertFalse(result.succeeded)
+        XCTAssertFalse(result.standardError.contains("Signature=unsigned"))
     }
 
     func testBundleAttributesAvoidRecursiveTraversal() throws {
@@ -155,6 +208,14 @@ final class NativeMetadataReadersTests: XCTestCase {
         XCTAssertEqual(result.command.first, "/usr/bin/codesign")
         XCTAssertNotNil(result.duration)
     }
+
+    private func entitlementDictionary(from result: CommandResult?) throws -> [String: Any] {
+        let result = try XCTUnwrap(result)
+        XCTAssertTrue(result.succeeded, result.combinedOutput)
+        let data = Data(result.standardOutput.utf8)
+        let propertyList = try PropertyListSerialization.propertyList(from: data, format: nil)
+        return try XCTUnwrap(propertyList as? [String: Any])
+    }
 }
 
 private struct AppFixture {
@@ -162,7 +223,7 @@ private struct AppFixture {
     let appURL: URL
     let executableURL: URL
 
-    init(appExtension: String = "app") throws {
+    init(appExtension: String = "app", executableContents: String? = nil) throws {
         rootURL = FileManager.default.temporaryDirectory
             .appending(path: "MacnosisNativeMetadataTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         appURL = rootURL.appending(path: "Fixture.\(appExtension)", directoryHint: .isDirectory)
@@ -171,7 +232,15 @@ private struct AppFixture {
             at: executableURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: executableURL)
+        if let executableContents {
+            try Data(executableContents.utf8).write(to: executableURL)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: executableURL.path
+            )
+        } else {
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: executableURL)
+        }
 
         let info: [String: Any] = [
             "CFBundleExecutable": "Fixture",

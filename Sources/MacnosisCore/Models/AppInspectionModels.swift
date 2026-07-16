@@ -60,7 +60,9 @@ public struct AppInspectionReport: Equatable, Sendable {
     }
 
     public var hasEntitlements: Bool {
-        debuggingStatus == .debuggable || debuggingStatus == .notDebuggable
+        debuggingStatus == .debuggable
+            || debuggingStatus == .notDebuggable
+            || debuggingStatus == .notApplicable
     }
 
     public var hasSignatureVerification: Bool {
@@ -127,6 +129,9 @@ public struct AppInspectionReport: Equatable, Sendable {
         }
 
         let output = signingDetails.combinedOutput
+        if output.contains("Signature=unsigned") {
+            return false
+        }
         if output.contains("Signature=adhoc") {
             return true
         }
@@ -135,6 +140,10 @@ public struct AppInspectionReport: Equatable, Sendable {
         }
 
         return output.contains("TeamIdentifier=not set") && signingAuthorityChain.isEmpty
+    }
+
+    public var isUnsigned: Bool {
+        signingDetails?.combinedOutput.contains("Signature=unsigned") == true
     }
 
     public var hasDeveloperIDSignature: Bool {
@@ -171,6 +180,10 @@ public struct AppInspectionReport: Equatable, Sendable {
 
     public var isDebuggable: Bool {
         debuggingStatus == .debuggable
+    }
+
+    public var canCreateDebuggableCopy: Bool {
+        debuggingStatus == .notDebuggable
     }
 
     public var executableFileDescriptionAvailability: DiagnosticAvailability {
@@ -231,6 +244,18 @@ public struct AppInspectionReport: Equatable, Sendable {
     }
 
     public var debuggingStatus: DebuggabilityStatus {
+        if executableURL != nil {
+            if executableFileDescriptionAvailability == .pending {
+                return .pending
+            }
+
+            if executableFileDescriptionAvailability == .available,
+               architectures.contains(where: { $0 == .script || $0 == .nonMachO })
+            {
+                return .notApplicable
+            }
+        }
+
         guard let entitlements else {
             return .pending
         }
@@ -424,6 +449,7 @@ public enum DebuggabilityStatus: Equatable, Sendable {
     case pending
     case debuggable
     case notDebuggable
+    case notApplicable
     case malformed
     case unavailable
 }

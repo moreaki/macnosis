@@ -29,6 +29,9 @@ Why this helps:
 
     com.apple.security.get-task-allow = true
 
+  The declared app executable must be a Mach-O binary. Script-only launchers
+  cannot carry this executable code-signing entitlement.
+
 What changes:
   The original app may be signed with a Developer ID certificate, for example:
 
@@ -190,6 +193,26 @@ validate_source_app() {
 	fi
 }
 
+validate_debuggable_executable() {
+	local app="$1"
+	local info_plist="$app/Contents/Info.plist"
+	local executable_name
+	local executable
+
+	if ! executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -- "$info_plist" 2>/dev/null)" \
+		|| [[ -z "$executable_name" ]]; then
+		printf 'error: app has no declared executable: %s\n' "$app" >&2
+		exit 1
+	fi
+
+	executable="$app/Contents/MacOS/$executable_name"
+	if [[ ! -f "$executable" ]] \
+		|| ! /usr/bin/file -bL -- "$executable" 2>/dev/null | grep -q 'Mach-O'; then
+		printf 'error: debugger entitlements require a Mach-O app executable: %s\n' "$executable" >&2
+		exit 1
+	fi
+}
+
 default_output_app() {
 	local app="$1"
 	local source_dir
@@ -259,6 +282,7 @@ make_debuggable_copy() {
 	local app="$1"
 	local output_app="$2"
 
+	validate_debuggable_executable "$app"
 	validate_output_app "$output_app"
 	ensure_output_available "$output_app"
 
